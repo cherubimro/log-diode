@@ -26,7 +26,12 @@ The paper is the design; this is the hardened, proven build. Four deliberate upg
 | Replay = a synchronized 64-bit counter | a proven **anti-replay window** + the AEAD nonce binds the counter | A replayed datagram fails the tag, not just "decrypts to garbage". |
 | **Repetition ×R, back-to-back, no interleaving** | **interleaved repetition + Reed-Solomon** sized to the message | The paper's own point: plain repetition dies to a burst that takes all R copies. Interleaving spreads them in time; RS (K ≥ 2) beats copies outright for multi-datagram messages. |
 | repeat every line (K = 1) | optional **`--batch N`**: pack N lines into one RS block | A single log line is RS at K = 1 = repetition (no coding gain). Batching lets a real RS block protect N lines at once — far cheaper on the wire under congestion. |
-| C, unverified | **AoRTE machine-checked** (`gnatprove`) | The syslog parser chews attacker-influenced bytes (logs flow from the *less* trusted side); a hostile line can never fault the daemon. |
+| an unverified reference implementation | **AoRTE machine-checked** (`gnatprove`) | The syslog parser chews attacker-influenced bytes (logs flow from the *less* trusted side); a hostile line can never fault the daemon. |
+
+This is **not a port of anyone's C** — it is a from-scratch, **pure Ada/SPARK** implementation of the
+paper's design whose distinguishing contribution *is* the machine-checked security proof. There is no C
+anywhere in the tree (SPARKNaCl, the crypto dependency, is itself pure Ada/SPARK), so the memory-safety
+attack surface of a C codec on the data path simply does not exist here.
 
 ## What is proven, and why these particular things
 
