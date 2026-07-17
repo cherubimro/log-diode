@@ -1,0 +1,4 @@
+/obj/
+/bin/
+deps/sparknacl/obj/
+deps/sparknacl/lib/

@@ -1,0 +1,41 @@
+--  SPDX-License-Identifier: AGPL-3.0-or-later
+--  Copyright (C) 2026  Alin-Adrian Anton <alin.anton@upt.ro>
+--
+--  log-diode : a high-assurance Ada/SPARK syslog data-diode amplifier.
+--
+--  An Ada/SPARK, AoRTE-proved reimplementation of the encrypted syslog diode
+--  amplifier of Anton et al., "Enhancing Syslog Message Security and Reliability
+--  over Unidirectional Fiber Optics" (Sensors 2024, 24, 6537).  syslog/UDP is
+--  received on the low-security side, each record is severity-gated, optionally
+--  batched (--batch N), AEAD-sealed (ChaCha20-Poly1305, replacing the paper's
+--  unauthenticated Speck-R) and Reed-Solomon-coded with interleaved repetition
+--  (replacing the paper's plain repeat-factor), crosses the diode, and is
+--  verified + de-duplicated + re-emitted as syslog/UDP on the high-security
+--  side.  The whole reconstruction + parsing data path is the proven SPARK core
+--  under src/core; only the sockets are the trusted shell.
+with "deps/sparknacl/sparknacl.gpr";
+
+project Log_Diode is
+
+   for Source_Dirs use ("src", "src/core", "tests");
+   for Object_Dir use "obj";
+   for Exec_Dir   use "bin";
+   for Main       use ("test_core.adb", "ld_amp.adb", "ld_deamp.adb");
+
+   package Compiler is
+      for Default_Switches ("Ada") use ("-g", "-O2", "-gnat2022", "-gnatwa");
+   end Compiler;
+
+   package Builder is
+      for Default_Switches ("Ada") use ("-j0");
+   end Builder;
+
+   package Prove is
+      --  --steps raised from the level-2 default: the K = 72 Reed-Solomon
+      --  instance makes the index/overflow VCs large.  --no-subprojects keeps
+      --  the vendored, separately-proven SPARKNaCl out of scope.
+      for Proof_Switches ("Ada") use
+        ("--level=2", "--steps=25000", "--no-subprojects", "--report=all");
+   end Prove;
+
+end Log_Diode;
