@@ -138,8 +138,13 @@
 \newcommand{\prog}[1]{\textsf{#1}}
 \newcommand{\amp}{\prog{ld\_amp}}
 \newcommand{\deamp}{\prog{ld\_deamp}}
-\newcommand{\lowside}{\textsc{low}}
-\newcommand{\highside}{\textsc{high}}
+%% The two ends of the link, named by ROLE rather than by security level.
+%% A diode can be deployed in either orientation -- ingesting into a
+%% protected domain, or exporting out of one -- so the mechanics here are
+%% written in terms of which end sends and which receives. Each project's
+%% "Orientation" section maps these onto its own security levels.
+\newcommand{\srcside}{\textsc{source}}
+\newcommand{\dstside}{\textsc{destination}}
 \newcommand{\nm}[1]{#1\,nm}
 \newcommand{\dbm}[1]{#1\,dBm}
 \newcommand{\dbb}[1]{#1\,dB}

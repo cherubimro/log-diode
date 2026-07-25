@@ -41,12 +41,18 @@ model, see the companion \emph{Data Diode Handbook}.
 %% =====================================================================
 \section{What you are building}
 
-A data diode carries information from a lower-security network to a
-higher-security one and makes the reverse physically impossible. Logs are
-the classic application: the Security Operations Centre must see the
-plant's logs, but nothing in the corporate world should be able to reach --- or
-write to --- the plant. That is a Bell--LaPadula arrangement, and a diode
-enforces it with optics rather than with policy.
+A data diode carries information one way between two networks and makes the
+reverse physically impossible. Throughout this guide \srcside{} is the network
+data leaves and \dstside{} the network it arrives in --- roles, not security
+levels, because a diode is useful in both orientations: ingesting into a
+protected domain, or exporting out of one.
+
+\textbf{log-diode ingests.} Logs are produced on the lower-security network
+and cross into the higher-security collector, so here \srcside{} is the
+less-trusted side. The Security Operations Centre sees the plant's logs, and
+nothing in the corporate world can reach --- or write to --- the plant. That is
+a Bell--LaPadula arrangement, and a diode enforces it with optics rather than
+with policy.
 
 \begin{figure}[h]
 \centering
@@ -70,9 +76,9 @@ enforces it with optics rather than with policy.
 
   \begin{scope}[on background layer]
     \node[netbox, inner sep=3mm, fit=(src)(amp),
-          label={[lbl]above:LOW-security network}] {};
+          label={[lbl]above:SOURCE network}] {};
     \node[netbox, inner sep=3mm, fit=(deamp)(siem),
-          label={[lbl]above:HIGH-security network}] {};
+          label={[lbl]above:DESTINATION network}] {};
   \end{scope}
 \end{tikzpicture}}
 \caption{The shape of the system. Everything left of the diode is untrusted;
@@ -100,7 +106,7 @@ see the warning at the head of \S\ref{sec:soft}.
 \begin{itemize}
 \item Two GNU/Linux hosts (or two VMs, or two network namespaces), each with a
       spare Ethernet interface for the diode link. In this guide the
-      \lowside{} host is \cmd{192.168.10.1} and the \highside{} host is
+      \srcside{} host is \cmd{192.168.10.1} and the \dstside{} host is
       \cmd{192.168.10.2}, both on \cmd{enp1s0}.
 \item \prog{log-diode} built: \cmd{./tools/build.sh} produces
       \cmd{bin/ld\_amp} and \cmd{bin/ld\_deamp}. This needs GNAT 14.2.0 and
@@ -145,24 +151,24 @@ With no return path there is no ARP resolution, so the peer's MAC address has
 to be configured by hand. This is the arrangement described in the paper
 (\S2.2) and it is needed for the hardware diode too.
 
-On the \lowside{} host, record the \highside{} host's MAC:
+On the \srcside{} host, record the \dstside{} host's MAC:
 
-\begin{lstlisting}[style=conf,caption={\file{/etc/ethers} on the LOW host}]
+\begin{lstlisting}[style=conf,caption={\file{/etc/ethers} on the SOURCE host}]
 bb:bb:bb:bb:bb:bb 192.168.10.2
 \end{lstlisting}
 
-and on the \highside{} host, record the \lowside{} host's MAC:
+and on the \dstside{} host, record the \srcside{} host's MAC:
 
-\begin{lstlisting}[style=conf,caption={\file{/etc/ethers} on the HIGH host}]
+\begin{lstlisting}[style=conf,caption={\file{/etc/ethers} on the DESTINATION host}]
 aa:aa:aa:aa:aa:aa 192.168.10.1
 \end{lstlisting}
 
 Then, on each host respectively:
 
 \begin{lstlisting}[style=shell]
-# LOW host
+# SOURCE host
 ip addr add 192.168.10.1/24 dev enp1s0
-# HIGH host
+# DESTINATION host
 ip addr add 192.168.10.2/24 dev enp1s0
 
 # both hosts: load the static entries and make them permanent
@@ -213,10 +219,10 @@ the diode interface}. A conntrack state entry, an \cmd{ESTABLISHED,RELATED}
 accept, or a pf \cmd{keep state} \emph{is} a return path. So is an ICMP
 port-unreachable and a TCP RST.
 
-\paragraph{nftables (the modern default).} On the \lowside{} host, egress
+\paragraph{nftables (the modern default).} On the \srcside{} host, egress
 only:
 
-\begin{lstlisting}[style=nft,caption={\file{/etc/nftables.conf} --- LOW host}]
+\begin{lstlisting}[style=nft,caption={\file{/etc/nftables.conf} --- SOURCE host}]
 #!/usr/sbin/nft -f
 flush ruleset
 
@@ -251,9 +257,9 @@ table inet diode {
 }
 \end{lstlisting}
 
-On the \highside{} host, ingress only:
+On the \dstside{} host, ingress only:
 
-\begin{lstlisting}[style=nft,caption={\file{/etc/nftables.conf} --- HIGH host}]
+\begin{lstlisting}[style=nft,caption={\file{/etc/nftables.conf} --- DESTINATION host}]
 #!/usr/sbin/nft -f
 flush ruleset
 
@@ -306,9 +312,9 @@ ip tuntap add dev tapdhigh mode tap
 # One bridge per side.  STP off -- BPDUs are bidirectional signalling.
 ip link add br-low  type bridge stp_state 0
 ip link add br-high type bridge stp_state 0
-ip link set eth0     master br-low     # NIC facing the LOW segment
+ip link set eth0     master br-low     # NIC facing the SOURCE segment
 ip link set tapdlow  master br-low
-ip link set eth1     master br-high    # NIC facing the HIGH segment
+ip link set eth1     master br-high    # NIC facing the DESTINATION segment
 ip link set tapdhigh master br-high
 for i in eth0 eth1 tapdlow tapdhigh br-low br-high; do ip link set "$i" up; done
 
@@ -346,8 +352,8 @@ a real boundary.
 \end{warnbox}
 
 Verify at layer 2 --- \cmd{ping} proves nothing about frames the IP stack
-never generates. Sniff \cmd{'ether proto 0x88b5'} on the \highside{} segment
-with \cmd{tcpdump} while injecting one tagged frame on \lowside{}, then swap
+never generates. Sniff \cmd{'ether proto 0x88b5'} on the \dstside{} segment
+with \cmd{tcpdump} while injecting one tagged frame on \srcside{}, then swap
 the two and confirm nothing arrives (Handbook \S4.7 has both commands).
 
 %% =====================================================================
@@ -370,13 +376,13 @@ deliberately left unplugged, supplies exactly that: carrier with nothing on it.
 \centering
 \resizebox{\textwidth}{!}{%
 \begin{tikzpicture}
-  \node[host, minimum width=22mm] (low) {LOW host\\\scriptsize 192.168.10.1};
+  \node[host, minimum width=22mm] (low) {SOURCE host\\\scriptsize 192.168.10.1};
   \node[mc, minimum width=22mm, right=14mm of low]
        (A) {\textbf{MC-A} (input)\\\scriptsize TX \quad RX};
   \node[mc, minimum width=22mm, right=24mm of A]
        (B) {\textbf{MC-B} (output)\\\scriptsize TX \quad RX};
   \node[host, minimum width=22mm, right=14mm of B]
-       (high) {HIGH host\\\scriptsize 192.168.10.2};
+       (high) {DESTINATION host\\\scriptsize 192.168.10.2};
   \node[mc, minimum width=30mm, below=18mm of $(A)!0.5!(B)$,
         fill=ldamber!10, draw=ldamber]
        (C) {\textbf{MC-C} (emulator)\\\scriptsize copper port UNUSED};
@@ -401,8 +407,8 @@ deliberately left unplugged, supplies exactly that: carrier with nothing on it.
 
 \begin{warnbox}[The one wire that must stay unplugged]
 MC-C's \emph{copper} port must be left disconnected. If anyone patches it into
-the \lowside{} network, links 2 and 3 become a complete return path from
-\highside{} to \lowside{} and the diode is gone. Label that port, cover it, and
+the \srcside{} network, links 2 and 3 become a complete return path from
+\dstside{} to \srcside{} and the diode is gone. Label that port, cover it, and
 put it on the commissioning checklist.
 \end{warnbox}
 
@@ -462,9 +468,9 @@ from the datasheet figures. Handbook \S5.3.
 \toprule
 \textbf{From} & \textbf{To} & \textbf{Why} \\
 \midrule
-LOW host NIC        & MC-A copper       & data enters the diode \\
+SOURCE host NIC        & MC-A copper       & data enters the diode \\
 \textbf{MC-A fiber TX} & \textbf{MC-B fiber RX} & \textbf{the one-way data path} \\
-MC-B copper         & HIGH host NIC     & data leaves the diode \\
+MC-B copper         & DESTINATION host NIC     & data leaves the diode \\
 MC-B fiber TX       & MC-C fiber RX     & keeps MC-C's transceiver up \\
 MC-C fiber TX       & MC-A fiber RX     & gives MC-A carrier so it holds link \\
 MC-C copper         & \textbf{nothing}  & breaks the loop; \emph{leave unplugged} \\
@@ -484,7 +490,7 @@ applying them anyway is good defence in depth.
 If MC-C goes completely dark with its copper port unplugged, your converters
 implement link-fault pass-through. Give MC-C a copper link that goes nowhere:
 an isolated switch port on a dead VLAN, or a loopback plug. Never give it a
-port on the \lowside{} network.
+port on the \srcside{} network.
 \end{tipbox}
 
 %% =====================================================================
@@ -499,38 +505,38 @@ commissioning evidence.
       table. Confirm MC-C's copper port is unplugged.
 
 \item \textbf{Carrier independence.} Unplug MC-B's copper cable from the
-      \highside{} host. MC-A must \emph{keep} its fiber link LED. If MC-A goes
+      \dstside{} host. MC-A must \emph{keep} its fiber link LED. If MC-A goes
       down, its carrier is coming from the far end and you have built a
       bidirectional link.
 
-\item \textbf{Reverse probe.} On the \lowside{} host, start a capture that
+\item \textbf{Reverse probe.} On the \srcside{} host, start a capture that
       accepts everything:
 \begin{lstlisting}[style=shell]
-# LOW host -- must stay silent for the whole test
+# SOURCE host -- must stay silent for the whole test
 tcpdump -ni enp1s0 -e -vv
 \end{lstlisting}
-      From the \highside{} host, try hard to get a packet back:
+      From the \dstside{} host, try hard to get a packet back:
 \begin{lstlisting}[style=shell]
-# HIGH host
+# DESTINATION host
 ping    -c 5           192.168.10.1
 arping  -c 5 -I enp1s0 192.168.10.1
 nc -u -w2              192.168.10.1 9999 <<< "probe"
 hping3 -S -c 5 -p 22   192.168.10.1        # TCP SYN
 \end{lstlisting}
-      The \lowside{} capture must show \textbf{nothing} from the \highside{}
+      The \srcside{} capture must show \textbf{nothing} from the \dstside{}
       host. Every command above must fail or time out.
 
-\item \textbf{TCP impossibility.} From the \highside{} host,
+\item \textbf{TCP impossibility.} From the \dstside{} host,
       \cmd{nc -w 5 192.168.10.1 22} must always time out. A three-way
       handshake cannot complete across a diode; if it does, you have a
       bidirectional link.
 
-\item \textbf{Forward path works.} From the \lowside{} host, send a datagram
+\item \textbf{Forward path works.} From the \srcside{} host, send a datagram
       and see it arrive:
 \begin{lstlisting}[style=shell]
-# HIGH host
+# DESTINATION host
 tcpdump -ni enp1s0 udp port 6514
-# LOW host
+# SOURCE host
 echo hello | nc -u -w1 192.168.10.2 6514
 \end{lstlisting}
 \end{enumerate}
@@ -544,17 +550,17 @@ has a checklist.
 %% =====================================================================
 \section{Run the daemons}
 
-Start the \highside{} side first, so nothing is lost:
+Start the \dstside{} side first, so nothing is lost:
 
 \begin{lstlisting}[style=shell]
-# HIGH host -- recover, authenticate, re-emit to the local rsyslog
+# DESTINATION host -- recover, authenticate, re-emit to the local rsyslog
 ./bin/ld_deamp 6514 127.0.0.1 514 --key 9f2c...4ab1
 \end{lstlisting}
 
-Then the \lowside{} side:
+Then the \srcside{} side:
 
 \begin{lstlisting}[style=shell]
-# LOW host -- take syslog on :1514, ship it across the diode
+# SOURCE host -- take syslog on :1514, ship it across the diode
 ./bin/ld_amp 1514 192.168.10.2 6514 --key 9f2c...4ab1 \
              --batch 8 --parity 6 --interleave 8 --flush-ms 500
 \end{lstlisting}
@@ -566,10 +572,10 @@ that produces logs:
 *.*  @192.168.10.1:1514
 \end{lstlisting}
 
-and on the \highside{} host, make rsyslog listen locally for what \deamp{}
+and on the \dstside{} host, make rsyslog listen locally for what \deamp{}
 re-emits:
 
-\begin{lstlisting}[style=conf,caption={\file{/etc/rsyslog.d/10-diode-in.conf} --- HIGH host}]
+\begin{lstlisting}[style=conf,caption={\file{/etc/rsyslog.d/10-diode-in.conf} --- DESTINATION host}]
 module(load="imudp")
 input(type="imudp" address="127.0.0.1" port="514")
 \end{lstlisting}
@@ -577,9 +583,9 @@ input(type="imudp" address="127.0.0.1" port="514")
 Test end to end:
 
 \begin{lstlisting}[style=shell]
-# LOW host
+# SOURCE host
 logger -n 127.0.0.1 -P 1514 -p local0.crit "diode commissioning test"
-# HIGH host
+# DESTINATION host
 tail -f /var/log/syslog | grep "diode commissioning test"
 \end{lstlisting}
 
@@ -608,15 +614,15 @@ tail -f /var/log/syslog | grep "diode commissioning test"
 \end{tabularx}
 \end{table}
 
-Start at \cmd{--batch 8 --parity 6 --interleave 8}. If the \highside{} side
+Start at \cmd{--batch 8 --parity 6 --interleave 8}. If the \dstside{} side
 is missing messages, raise \cmd{--parity} first, then \cmd{--interleave}.
 Handbook \S7.4 works through the tuning.
 
 \subsection{As services}
 
-\begin{lstlisting}[style=conf,caption={\file{/etc/systemd/system/ld-amp.service} --- LOW host}]
+\begin{lstlisting}[style=conf,caption={\file{/etc/systemd/system/ld-amp.service} --- SOURCE host}]
 [Unit]
-Description=log-diode amplifier (LOW side)
+Description=log-diode amplifier (SOURCE side)
 After=network-online.target diode-link.service
 Wants=network-online.target
 
@@ -644,7 +650,7 @@ printf 'DIODE_KEY=%s\n' "$(openssl rand -hex 32)" > /etc/log-diode/key.env
 chmod 0400 /etc/log-diode/key.env
 \end{lstlisting}
 
-The \highside{} unit is the same shape with
+The \dstside{} unit is the same shape with
 \cmd{ExecStart=\ldots/ld\_deamp 6514 127.0.0.1 514 --key \$\{DIODE\_KEY\}}
 and the identical key file, carried across by hand.
 
@@ -675,8 +681,8 @@ and the identical key file, carried across by hand.
 \item \textbf{The layer-2 tunnel in full.} The complete \file{tapdiode.c},
       its design notes, the bridge and \prog{sysctl} hardening, and how to
       verify it at layer 2 --- Handbook \S4.7.
-\item \textbf{Why the daemons are proved.} The parser on the \highside{} side
-      chews bytes chosen by whoever compromised the \lowside{} network, on a
+\item \textbf{Why the daemons are proved.} The parser on the \dstside{} side
+      chews bytes chosen by whoever compromised the \srcside{} network, on a
       link with no way to ask for a retry --- Handbook \S7.1 and
       \file{docs/ASSURANCE.md}.
 \item \textbf{Scaling.} Several diodes in parallel, round-robin ---

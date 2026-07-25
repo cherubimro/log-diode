@@ -91,12 +91,37 @@ to read before anything goes into production.
 
 \subsection{Conventions}
 
-Throughout, \lowside{} is the lower-security network (where logs are produced,
-and where an attacker is assumed to be) and \highside{} is the higher-security
-network (where logs are collected and analysed). Information flows
-\lowside{}~$\rightarrow$~\highside{} only. Addresses are \cmd{192.168.10.1}
-(\lowside{}) and \cmd{192.168.10.2} (\highside{}); the diode-facing interface
-is \cmd{enp1s0} on Linux and \cmd{em0} on BSD.
+Throughout, \srcside{} is the network data leaves and \dstside{} is the
+network it arrives in. Information flows
+\srcside{}~$\rightarrow$~\dstside{} only.
+
+These are \emph{roles, not security levels}, and the distinction matters. A
+diode is deployed in one of two orientations, and which one you are building
+decides what the device is protecting:
+
+\begin{itemize}
+\item \textbf{Ingest} --- the source is the lower-security network and the
+      destination the higher-security one. The diode protects the
+      destination's \emph{confidentiality}: the untrusted side can send in but
+      can never read back. This is the Bell--LaPadula arrangement
+      \cite{bell1976}, and it is how log collection works --- a SOC ingests
+      logs from a network where an attacker may already be.
+\item \textbf{Export} --- the source is the higher-security network and the
+      destination the lower-security one. The diode protects the source's
+      \emph{integrity and reachability}: the protected side publishes outward,
+      and nothing on the receiving network can reach in, write to it, or probe
+      it. This is how a plant exports process data or a database ships its
+      write-ahead log to a mirror.
+\end{itemize}
+
+Everything mechanical in this handbook --- the firewall rules, the media
+converters, the SPI link, the commissioning tests --- is identical in both
+orientations, which is why it is written in terms of source and destination.
+\S\ref{sec:orient} states which orientation this project uses.
+
+Addresses are \cmd{192.168.10.1} (\srcside{}) and \cmd{192.168.10.2}
+(\dstside{}); the diode-facing interface is \cmd{enp1s0} on Linux and
+\cmd{em0} on BSD.
 
 %% =====================================================================
 \section{Threat model and assurance tiers}
@@ -105,23 +130,36 @@ is \cmd{enp1s0} on Linux and \cmd{em0} on BSD.
 \subsection{The property being claimed}
 
 A data diode makes one claim: \emph{no information can travel from
-\highside{} to \lowside{}}. Everything else --- confidentiality, integrity,
-reliability --- is built on top of that claim by the software running across
-the link, not by the link itself.
+\dstside{} back to \srcside{}}. Everything else --- confidentiality,
+integrity, reliability --- is built on top of that claim by the software
+running across the link, not by the link itself.
 
-This is the Bell--LaPadula confidentiality model: no subject at the low level
-may read from the high level. The paper pairs it with a Biba-style integrity
-argument and write-once read-many storage on the \highside{} side, so that
-logs at rest cannot be altered even from within \highside{}
-\cite{anton2024}.
+That single claim is what both orientations rest on. In an ingest deployment
+it means the untrusted sender can never read the protected receiver, which is
+Bell--LaPadula confidentiality \cite{bell1976}. In an export deployment it
+means the receiving network can never reach back into the protected sender,
+which is an integrity and isolation property rather than a confidentiality
+one. The hardware is the same; only what you are protecting changes.
+
+\subsection{Orientation for this project}
+\label{sec:orient}
+
+\textbf{log-diode is an ingest deployment.} Syslog is produced on the
+lower-security network --- the datacenter, where a compromised device may
+already be --- and crosses into the higher-security aggregator. So
+\srcside{}~=~low security and \dstside{}~=~high security here, and the
+property being bought is Bell--LaPadula confidentiality of the collector. The
+paper pairs it with a Biba-style integrity argument and write-once read-many
+storage on the receiving side, so logs at rest cannot be altered even from
+within it \cite{anton2024}.
 
 \begin{notebox}[What a diode does not do]
 A diode says nothing about the \emph{truthfulness} of what crosses it. A
-compromised device on \lowside{} can send whatever it likes, including forged
+compromised device on \srcside{} can send whatever it likes, including forged
 or replayed log lines. The diode guarantees only that the attacker cannot
-\emph{see} or \emph{reach} \highside{}. Authenticity of content is the
+\emph{see} or \emph{reach} \dstside{}. Authenticity of content is the
 cryptography's job (\S\ref{sec:integrate}), and the authenticity of the
-\emph{sender} depends on the security of the \lowside{} devices themselves.
+\emph{sender} depends on the security of the \srcside{} devices themselves.
 \end{notebox}
 
 \subsection{Three tiers, and where each fails}
@@ -158,7 +196,7 @@ Physical\newline (optics, or SPI with MISO omitted) &
 
 The distinction matters because of \emph{who} you are defending against. If
 the adversary is a misconfigured application, a firewall diode helps. If the
-adversary has code execution on the \lowside{} host --- which is the entire
+adversary has code execution on the \srcside{} host --- which is the entire
 premise of putting a diode between the log producers and the SOC --- then the
 firewall is inside the attacker's blast radius and the guarantee evaporates.
 As the paper puts it, the highest security diode enforces unidirectionality
@@ -208,7 +246,7 @@ ARP & The sender never learns the receiver's MAC. Must be configured
 ICMP & No \cmd{ping}, no path MTU discovery. Set the MTU by hand and keep
        datagrams comfortably under it. \\
 DNS, NTP, DHCP & All require a reply. Use static addressing, static
-       \file{/etc/hosts}, and an \highside{}-local time source. \\
+       \file{/etc/hosts}, and an \dstside{}-local time source. \\
 Retransmission & Nothing can be requested again. Redundancy has to be sent
        \emph{in advance}. \\
 Key exchange & No Diffie--Hellman, no TLS. Keys are pre-shared out of band. \\
@@ -249,14 +287,14 @@ Every ruleset in this section obeys a single negative rule:
 A conntrack entry, an \cmd{ESTABLISHED,RELATED} accept, or a pf
 \cmd{keep state} exists precisely to let the reply through. So does a TCP RST
 and an ICMP port-unreachable --- both are packets travelling the wrong way,
-and both leak information (they tell the \highside{} side that something is
+and both leak information (they tell the \dstside{} side that something is
 listening). Stateless, silent dropping is the only correct behaviour.
 
 \begin{figure}[h]
 \centering
 \begin{tikzpicture}
-  \node[host] (low) {LOW host\\\scriptsize 192.168.10.1};
-  \node[host, right=45mm of low] (high) {HIGH host\\\scriptsize 192.168.10.2};
+  \node[host] (low) {SOURCE host\\\scriptsize 192.168.10.1};
+  \node[host, right=45mm of low] (high) {DESTINATION host\\\scriptsize 192.168.10.2};
   \draw[dataflow] (low) -- node[lbl,above]{UDP 6514 only}
                            node[lbl,below]{no state, no conntrack} (high);
   \draw[blocked] (high.south) to[out=-150,in=-30]
@@ -277,16 +315,16 @@ resolution has to be done by hand.
 
 \subsubsection{Linux}
 
-Record the peer's MAC in \file{/etc/ethers} on each host (\lowside{} records
-\highside{}'s, and vice versa):
+Record the peer's MAC in \file{/etc/ethers} on each host (\srcside{} records
+\dstside{}'s, and vice versa):
 
 \begin{lstlisting}[style=conf]
-# /etc/ethers on the LOW host
+# /etc/ethers on the SOURCE host
 bb:bb:bb:bb:bb:bb 192.168.10.2
 \end{lstlisting}
 
 \begin{lstlisting}[style=shell]
-ip addr add 192.168.10.1/24 dev enp1s0     # .2/24 on the HIGH host
+ip addr add 192.168.10.1/24 dev enp1s0     # .2/24 on the DESTINATION host
 ip link set enp1s0 up
 arp -f /etc/ethers                          # net-tools package
 ip neigh show dev enp1s0                    # must report PERMANENT
@@ -331,7 +369,7 @@ symmetric-subnet layout used here, strict reverse-path filtering
 (\cmd{rp\_filter=1}) passes, because the route to the peer's source address
 does point out of \cmd{enp1s0}. If you place the two sides in \emph{different}
 subnets --- a common choice, since routing back is impossible anyway --- strict
-RPF will silently discard every arriving datagram on the \highside{} host.
+RPF will silently discard every arriving datagram on the \dstside{} host.
 That failure looks exactly like a broken diode. Set
 \cmd{net.ipv4.conf.enp1s0.rp\_filter = 0} in that case and note it in the
 commissioning record.
@@ -369,7 +407,7 @@ sees \emph{every} frame, including ARP, LLDP and IPv6, before the IP stack
 does. A single \cmd{policy drop} there makes the interface deaf at the link
 layer.
 
-\begin{lstlisting}[style=nft,caption={\file{/etc/nftables.conf} --- LOW host (transmit only)}]
+\begin{lstlisting}[style=nft,caption={\file{/etc/nftables.conf} --- SOURCE host (transmit only)}]
 #!/usr/sbin/nft -f
 flush ruleset
 
@@ -402,7 +440,7 @@ table inet diode {
 }
 \end{lstlisting}
 
-\begin{lstlisting}[style=nft,caption={\file{/etc/nftables.conf} --- HIGH host (receive only)}]
+\begin{lstlisting}[style=nft,caption={\file{/etc/nftables.conf} --- DESTINATION host (receive only)}]
 #!/usr/sbin/nft -f
 flush ruleset
 
@@ -430,7 +468,7 @@ table inet diode {
 
 The \cmd{counter} keywords are not decoration. After a test run,
 \cmd{nft list ruleset} shows how many packets each rule matched; a non-zero
-counter on the \highside{} host's output-drop rule is direct evidence that
+counter on the \dstside{} host's output-drop rule is direct evidence that
 something tried to talk backwards.
 
 \begin{lstlisting}[style=shell]
@@ -444,7 +482,7 @@ nft list ruleset | grep -c "ct state"   # must print 0
 Still widespread, and named explicitly in many site standards. The rules are
 a direct transliteration, with one important gap.
 
-\begin{lstlisting}[style=shell,caption={LOW host}]
+\begin{lstlisting}[style=shell,caption={SOURCE host}]
 iptables -F && iptables -X
 iptables -P INPUT   DROP
 iptables -P OUTPUT  DROP
@@ -464,7 +502,7 @@ iptables -A OUTPUT -o enp1s0 -j DROP
 ip6tables -P INPUT DROP; ip6tables -P OUTPUT DROP; ip6tables -P FORWARD DROP
 \end{lstlisting}
 
-\begin{lstlisting}[style=shell,caption={HIGH host}]
+\begin{lstlisting}[style=shell,caption={DESTINATION host}]
 iptables -F && iptables -X
 iptables -P INPUT   DROP
 iptables -P OUTPUT  DROP
@@ -482,7 +520,7 @@ ip6tables -P INPUT DROP; ip6tables -P OUTPUT DROP; ip6tables -P FORWARD DROP
 
 \begin{warnbox}[iptables cannot filter ARP]
 \prog{iptables} operates on IP. ARP traffic passes it untouched, so on
-\prog{iptables} alone the \highside{} host will still answer ARP requests
+\prog{iptables} alone the \dstside{} host will still answer ARP requests
 across the link --- a working, if narrow, return channel. Close it with
 \prog{arptables} (or \prog{ebtables}), or use \prog{nftables}, whose
 \cmd{netdev} ingress hook covers all of it:
@@ -505,7 +543,7 @@ setting that matters more here than anywhere else: \cmd{set block-policy drop}.
 The alternative, \cmd{return}, answers blocked traffic with TCP RSTs and ICMP
 unreachables --- packets flowing the wrong way.
 
-\begin{lstlisting}[style=pf,caption={\file{/etc/pf.conf} --- LOW host}]
+\begin{lstlisting}[style=pf,caption={\file{/etc/pf.conf} --- SOURCE host}]
 diode_if = "em0"
 peer     = "192.168.10.2"
 port     = 6514
@@ -526,7 +564,7 @@ block in  quick on $diode_if all
 block out quick on $diode_if all
 \end{lstlisting}
 
-\begin{lstlisting}[style=pf,caption={\file{/etc/pf.conf} --- HIGH host}]
+\begin{lstlisting}[style=pf,caption={\file{/etc/pf.conf} --- DESTINATION host}]
 diode_if = "em0"
 peer     = "192.168.10.1"
 port     = 6514
@@ -557,7 +595,7 @@ release, so newer OpenBSD-only syntax will not parse there --- everything used
 here predates the split. Interface names differ (\cmd{em0}, \cmd{igb0},
 \cmd{re0}, \cmd{vtnet0}). FreeBSD users who prefer \prog{ipfw} can express the
 same policy with \cmd{ipfw add deny ip from any to any in via em0} on the
-\lowside{} host; the stateless requirement is identical --- do not use
+\srcside{} host; the stateless requirement is identical --- do not use
 \cmd{keep-state} or \cmd{check-state}.
 
 \subsection{A diode in network namespaces, for CI}
@@ -609,13 +647,13 @@ layer-2 tunnel --- the same Ethernet semantics as the optical diode of
 \begin{figure}[h]
 \centering
 \begin{tikzpicture}[node distance=7mm]
-  %% top row: the LOW segment feeds the input tap
+  %% top row: the SOURCE segment feeds the input tap
   \node[host, minimum width=20mm] (lseg) {LOW\\segment};
   \node[mc, minimum width=14mm, right=of lseg] (e0) {eth0};
   \node[mc, minimum width=18mm, right=of e0, fill=ldblue!8] (brl) {br-low};
   \node[mc, minimum width=19mm, right=of brl, fill=ldamber!12,
         draw=ldamber] (tl) {tapdlow};
-  %% bottom row: the output tap feeds the HIGH segment (flows right to left)
+  %% bottom row: the output tap feeds the DESTINATION segment (flows right to left)
   \node[host, minimum width=20mm, below=24mm of lseg] (hseg) {HIGH\\segment};
   \node[mc, minimum width=14mm, right=of hseg] (e1) {eth1};
   \node[mc, minimum width=18mm, right=of e1, fill=ldblue!8] (brh) {br-high};
@@ -857,9 +895,9 @@ ip tuntap add dev tapdhigh mode tap
 ip link add br-low  type bridge stp_state 0
 ip link add br-high type bridge stp_state 0
 
-ip link set eth0     master br-low     # NIC facing the LOW segment
+ip link set eth0     master br-low     # NIC facing the SOURCE segment
 ip link set tapdlow  master br-low
-ip link set eth1     master br-high    # NIC facing the HIGH segment
+ip link set eth1     master br-high    # NIC facing the DESTINATION segment
 ip link set tapdhigh master br-high
 
 for i in eth0 eth1 tapdlow tapdhigh br-low br-high; do ip link set "$i" up; done
@@ -887,7 +925,7 @@ master.
 \end{notebox}
 
 \begin{notebox}[Frames from HIGH do enter tapdhigh, and stop there]
-\cmd{br-high} forwards \highside{} traffic toward \cmd{tapdhigh}, so those
+\cmd{br-high} forwards \dstside{} traffic toward \cmd{tapdhigh}, so those
 frames land in that tap's transmit queue --- where nothing ever reads them,
 because \cmd{tapdiode} never calls \cmd{read()} on \cmd{out\_fd}. The queue
 fills and the kernel discards them. This costs a little memory and no
@@ -904,10 +942,10 @@ stack never generates. Inject a tagged frame with a distinctive EtherType on
 one segment and sniff for it on the other:
 
 \begin{lstlisting}[style=shell]
-# On the HIGH segment: capture (EtherType 0x88b5 is reserved for local use)
+# On the DESTINATION segment: capture (EtherType 0x88b5 is reserved for local use)
 tcpdump -ni eth0 -e 'ether proto 0x88b5'
 
-# On the LOW segment: inject one frame
+# On the SOURCE segment: inject one frame
 python3 - <<'PY'
 import socket
 s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW); s.bind(('eth0', 0))
@@ -915,10 +953,10 @@ s.send(b'\xff'*6 + b'\x02\x00\x00\x00\x00\x01' + b'\x88\xb5' + b'DIODETEST')
 PY
 \end{lstlisting}
 
-The frame must appear on the \highside{} segment. Then reverse the two
-commands: injecting on \highside{} must produce \emph{nothing} on \lowside{},
+The frame must appear on the \dstside{} segment. Then reverse the two
+commands: injecting on \dstside{} must produce \emph{nothing} on \srcside{},
 while a capture on \cmd{br-high} confirms the frame really was injected --- so
-that a silent \lowside{} means one-wayness and not a broken injector.
+that a silent \srcside{} means one-wayness and not a broken injector.
 
 \begin{tipbox}
 Sniff with \cmd{socket.htons(3)} if you write the capture side in Python. The
@@ -978,13 +1016,13 @@ holds the link up. The other half of the light is the data path.
 \centering
 \resizebox{\textwidth}{!}{%
 \begin{tikzpicture}
-  \node[host, minimum width=20mm] (low) {LOW host};
+  \node[host, minimum width=20mm] (low) {SOURCE host};
   \node[mc, minimum width=20mm, right=13mm of low]
        (A) {\textbf{MC-A}\\\scriptsize TX \quad RX};
   \node[splitter, right=13mm of A] (S) {1$\times$2\\splitter};
   \node[mc, minimum width=20mm, right=13mm of S]
        (B) {\textbf{MC-B}\\\scriptsize TX \quad RX};
-  \node[host, minimum width=20mm, right=13mm of B] (high) {HIGH host};
+  \node[host, minimum width=20mm, right=13mm of B] (high) {DESTINATION host};
 
   \draw[copper] (low) -- (A);
   \draw[copper] (B) -- (high);
@@ -1007,17 +1045,17 @@ An optical splitter is a passive, bidirectional device. Light entering any leg
 emerges from the others. In Figure~\ref{fig:splitter} the only reason no
 information flows backwards is that \textbf{MC-B's transmitter is not
 connected to anything}. Cap that port. If someone later patches MC-B's TX into
-a spare splitter leg --- or into the return fiber --- \highside{} data reaches
+a spare splitter leg --- or into the return fiber --- \dstside{} data reaches
 MC-A's receiver and the diode is gone, with no visible change to the front
 panel LEDs.
 \end{warnbox}
 
 \begin{notebox}[The transmitter hears its own echo]
 MC-A receives its own transmission, so MC-A's copper port re-emits every frame
-the \lowside{} host sent. This is harmless to the diode property --- nothing
-from \highside{} is involved --- but it has two practical consequences:
+the \srcside{} host sent. This is harmless to the diode property --- nothing
+from \dstside{} is involved --- but it has two practical consequences:
 \begin{itemize}
-\item \textbf{Never put a switch between the \lowside{} host and MC-A.} The
+\item \textbf{Never put a switch between the \srcside{} host and MC-A.} The
       echo becomes a forwarding loop and then a broadcast storm. Connect the
       host's NIC directly.
 \item Disable ARP and IPv6 on the diode interface (\S\ref{sec:linklayer}) so
@@ -1129,10 +1167,10 @@ optical carrier and can never carry data.
 \centering
 \resizebox{\textwidth}{!}{%
 \begin{tikzpicture}
-  \node[host, minimum width=20mm] (low) {LOW host};
+  \node[host, minimum width=20mm] (low) {SOURCE host};
   \node[mc, minimum width=20mm, right=15mm of low] (A) {\textbf{MC-A}\\\scriptsize input};
   \node[mc, minimum width=20mm, right=26mm of A] (B) {\textbf{MC-B}\\\scriptsize output};
-  \node[host, minimum width=20mm, right=15mm of B] (high) {HIGH host};
+  \node[host, minimum width=20mm, right=15mm of B] (high) {DESTINATION host};
   \node[mc, minimum width=34mm, below=20mm of $(A)!0.5!(B)$,
         fill=ldamber!10, draw=ldamber]
        (C) {\textbf{MC-C} carrier source\\\scriptsize copper port UNPLUGGED};
@@ -1152,7 +1190,7 @@ optical carrier and can never carry data.
          copper port.}
 \end{figure}
 
-\paragraph{Why it is safe.} Trace a hypothetical leak. \highside{} data enters
+\paragraph{Why it is safe.} Trace a hypothetical leak. \dstside{} data enters
 MC-B's copper port, leaves MC-B's fiber TX on link~2, and arrives at MC-C's
 fiber RX. MC-C converts it to copper --- and its copper port goes nowhere, so
 the frames are discarded. MC-C's fiber TX is driven by MC-C's \emph{copper
@@ -1169,7 +1207,7 @@ emulator running'' \cite{anton2024}.
 Everything rests on MC-C's copper port being unplugged. Cap it, label it
 \emph{``MUST REMAIN DISCONNECTED --- DATA DIODE''}, and put it first on the
 audit checklist in \S\ref{sec:commission}. A well-meaning administrator
-patching that port into the \lowside{} switch converts the diode into an
+patching that port into the \srcside{} switch converts the diode into an
 ordinary bidirectional link, and no LED changes colour to say so.
 \end{warnbox}
 
@@ -1177,7 +1215,7 @@ ordinary bidirectional link, and no LED changes colour to say so.
 Some converters implement link-fault pass-through and go dark on fiber when
 their copper link is down. If MC-C behaves that way, give it a copper link
 that leads nowhere: an isolated switch port on a dead VLAN with no uplink, or
-a loopback plug. Never a port on the \lowside{} network --- that would rebuild
+a loopback plug. Never a port on the \srcside{} network --- that would rebuild
 the return path you just broke.
 \end{tipbox}
 
@@ -1206,7 +1244,7 @@ Optical margin   & Reduced by $\approx$\dbb{4}; within budget on all three
 Procurement      & Trivial at \nm{1310}; the \nm{850} splitter is a special
                    order with a long lead time &
                    Everything is catalogue stock at any wavelength \\
-Transmitter echo & Yes --- host hears itself; no switch on the \lowside{} leg &
+Transmitter echo & Yes --- host hears itself; no switch on the \srcside{} leg &
                    No \\
 Failure points   & 2 active + 1 passive & 3 active \\
 Critical rule    & MC-B's TX must stay unconnected &
@@ -1291,8 +1329,8 @@ scale and for a few cents.
                  node[midway,fill=white,inner sep=1.5pt]{\xmark}
                  node[lblr,midway,below=3.5mm]{MISO --- conductor not fitted};
 \end{tikzpicture}
-\caption{A three-wire SPI diode. Every conductor is driven by the \lowside{}
-         side and read by the \highside{} side; the return data line is not
+\caption{A three-wire SPI diode. Every conductor is driven by the \srcside{}
+         side and read by the \dstside{} side; the return data line is not
          fitted.}
 \label{fig:spi}
 \end{figure}
@@ -1302,16 +1340,16 @@ scale and for a few cents.
 This is the design decision that matters, and it is not the obvious one.
 
 An SPI master drives SCLK, CS and MOSI, and reads MISO. A slave drives MISO
-and reads the rest. For information to flow \lowside{}~$\rightarrow$~\highside{}
-with \emph{no} conductor driven from \highside{}, the \lowside{} side must be
-the master: it drives clock and data, and the \highside{} side only ever
+and reads the rest. For information to flow \srcside{}~$\rightarrow$~\dstside{}
+with \emph{no} conductor driven from \dstside{}, the \srcside{} side must be
+the master: it drives clock and data, and the \dstside{} side only ever
 listens.
 
-The tempting alternative --- make the \highside{} side the master so it
+The tempting alternative --- make the \dstside{} side the master so it
 ``pulls'' data --- quietly reintroduces a channel. A master drives the clock,
-so SCLK would run \highside{}~$\rightarrow$~\lowside{}, and the \highside{}
+so SCLK would run \dstside{}~$\rightarrow$~\srcside{}, and the \dstside{}
 side could then modulate the timing or gating of clock edges into a signal the
-\lowside{} side can observe. It is a low-rate channel, but it is a real one,
+\srcside{} side can observe. It is a low-rate channel, but it is a real one,
 and it exists by construction rather than by bug.
 
 \begin{table}[h]
@@ -1320,13 +1358,13 @@ and it exists by construction rather than by bug.
 \toprule
 \textbf{Signal} & \textbf{Fitted?} & \textbf{Direction and role} \\
 \midrule
-SCLK & yes & \lowside{}~$\rightarrow$~\highside{}. Clock; the sender sets the
+SCLK & yes & \srcside{}~$\rightarrow$~\dstside{}. Clock; the sender sets the
              pace. \\
-MOSI & yes & \lowside{}~$\rightarrow$~\highside{}. The data. \\
+MOSI & yes & \srcside{}~$\rightarrow$~\dstside{}. The data. \\
 GND  & yes & Common return. See the isolation note below. \\
-CS   & optional & \lowside{}~$\rightarrow$~\highside{}. A fourth conductor
+CS   & optional & \srcside{}~$\rightarrow$~\dstside{}. A fourth conductor
              that gives hardware frame boundaries; strongly recommended. \\
-MISO & \textbf{no} & Would be \highside{}~$\rightarrow$~\lowside{}. Omit the
+MISO & \textbf{no} & Would be \dstside{}~$\rightarrow$~\srcside{}. Omit the
              conductor entirely --- do not merely leave it unconfigured. \\
 \bottomrule
 \end{tabularx}
@@ -1346,8 +1384,8 @@ direction, not the marketing name.
 \begin{warnbox}[Never add a ready line]
 Without MISO there is no flow control: the master clocks bits out whether or
 not the slave is keeping up. The standard embedded fix is a GPIO from slave to
-master meaning ``ready'' or ``busy'' --- and that is a wire from \highside{} to
-\lowside{}. Adding it destroys the diode as thoroughly as fitting MISO would,
+master meaning ``ready'' or ``busy'' --- and that is a wire from \dstside{} to
+\srcside{}. Adding it destroys the diode as thoroughly as fitting MISO would,
 and it is the single most likely mistake in this design because every SPI
 tutorial recommends it. Handle overrun the way the rest of this handbook
 handles loss: clock slowly enough that the receiver always keeps up, use DMA
@@ -1357,7 +1395,7 @@ with double buffering, and send redundancy in advance.
 \subsubsection{Isolation}
 
 A shared ground is still a conductor between the two domains. Where that
-matters --- different power domains, an untrusted \lowside{} board, or simply a
+matters --- different power domains, an untrusted \srcside{} board, or simply a
 wish to make the property auditable at a glance --- put a digital isolator or
 an optocoupler on each of the three signals. This is worth doing for its own
 sake:
@@ -1413,14 +1451,14 @@ a shrunken build must be re-proved before any of the assurance claims in
       audit, and it is why the design is attractive --- correctness is visible
       without instruments.
 \item \textbf{Continuity.} With both boards powered down, confirm an open
-      circuit between the \highside{} MCU's MISO pin and every conductor in
+      circuit between the \dstside{} MCU's MISO pin and every conductor in
       the cable. Repeat after any rework.
-\item \textbf{Drive test.} Configure the \highside{} MCU to drive its MISO pin
-      hard, high and low, in a loop. The \lowside{} MCU must see nothing on
+\item \textbf{Drive test.} Configure the \dstside{} MCU to drive its MISO pin
+      hard, high and low, in a loop. The \srcside{} MCU must see nothing on
       any pin. This catches a MISO track left on a shared PCB, which a wire
       count will not.
 \item \textbf{Isolator orientation.} If optocouplers are fitted, confirm each
-      one's input side faces \lowside{}. A part installed backwards will
+      one's input side faces \srcside{}. A part installed backwards will
       usually appear to work --- in the wrong direction.
 \item \textbf{Overrun.} Run the sender at full rate for an extended period and
       confirm the receiver's dropped-frame counter behaves as loss, not as
@@ -1440,7 +1478,7 @@ ordered so that each one fails cheaply before the next.
 \item Trace every fiber by hand against the wiring table for your topology.
 \item Topology B: confirm MC-C's copper port is unplugged and capped.
       Topology A: confirm MC-B's fiber TX is unconnected and capped.
-\item Confirm the \lowside{} host connects \emph{directly} to MC-A, with no
+\item Confirm the \srcside{} host connects \emph{directly} to MC-A, with no
       switch (mandatory for Topology A because of the echo).
 \item Photograph the finished wiring. Attach it to the commissioning record;
       it is what a future auditor compares against.
@@ -1448,7 +1486,7 @@ ordered so that each one fails cheaply before the next.
 
 \subsection{Carrier independence}
 
-Unplug MC-B's copper cable from the \highside{} host. MC-A must keep its fiber
+Unplug MC-B's copper cable from the \dstside{} host. MC-A must keep its fiber
 link LED. If MC-A drops, its carrier is arriving from the far end and the link
 is bidirectional.
 
@@ -1458,14 +1496,14 @@ source.
 
 \subsection{Active reverse probing}
 
-Capture everything on the \lowside{} host for the duration:
+Capture everything on the \srcside{} host for the duration:
 
 \begin{lstlisting}[style=shell]
-# LOW host -- runs for the whole test, must stay silent
+# SOURCE host -- runs for the whole test, must stay silent
 tcpdump -ni enp1s0 -e -vv -w /tmp/diode-commissioning.pcap
 \end{lstlisting}
 
-From the \highside{} host, attempt every reasonable back channel:
+From the \dstside{} host, attempt every reasonable back channel:
 
 \begin{lstlisting}[style=shell]
 ping   -c 5            192.168.10.1        # ICMP echo
@@ -1476,7 +1514,7 @@ hping3 -S -c 5 -p 22   192.168.10.1        # raw SYN
 hping3 -1 -c 5         192.168.10.1        # raw ICMP
 \end{lstlisting}
 
-Then verify the capture contains nothing whose source is the \highside{} host:
+Then verify the capture contains nothing whose source is the \dstside{} host:
 
 \begin{lstlisting}[style=shell]
 tcpdump -nr /tmp/diode-commissioning.pcap "src host 192.168.10.2"
@@ -1486,20 +1524,20 @@ tcpdump -nr /tmp/diode-commissioning.pcap "src host 192.168.10.2"
 \subsection{Forward path and end-to-end}
 
 \begin{lstlisting}[style=shell]
-# HIGH host
+# DESTINATION host
 tcpdump -ni enp1s0 udp port 6514
-# LOW host
+# SOURCE host
 echo hello | nc -u -w1 192.168.10.2 6514
 
 # then, with the daemons running:
-# LOW host
+# SOURCE host
 logger -n 127.0.0.1 -P 1514 -p local0.crit "diode commissioning $(date -Is)"
-# HIGH host
+# DESTINATION host
 journalctl -f | grep "diode commissioning"
 \end{lstlisting}
 
-Finally, pull MC-A's TX fiber: the \highside{} side must stop receiving
-immediately, and the \lowside{} side must be entirely unaffected --- it has no
+Finally, pull MC-A's TX fiber: the \dstside{} side must stop receiving
+immediately, and the \srcside{} side must be entirely unaffected --- it has no
 way to notice.
 
 \subsection{Recurring audit}
@@ -1513,7 +1551,7 @@ silent, so both need a calendar entry.
 \toprule
 \textbf{Interval} & \textbf{Check} \\
 \midrule
-Continuous & \highside{}-side monitoring alerts if the log stream stops. This
+Continuous & \dstside{}-side monitoring alerts if the log stream stops. This
              is the only automatic failure indication you get --- configure it. \\
 Monthly    & Physical inspection: all LEDs as expected, MC-C's copper port
              still unplugged, seals intact, photo still matches. \\
@@ -1532,7 +1570,7 @@ On change  & Any rewiring, converter replacement, or firmware change re-runs
 
 The receiver parses bytes that arrive from the \emph{less} trusted network,
 on a link that cannot ask for anything to be resent, in a process that sits on
-the \highside{} side of the boundary. A parser that can fault or read out of
+the \dstside{} side of the boundary. A parser that can fault or read out of
 bounds on a hostile log line is a foothold in exactly the place a diode exists
 to protect, and log injection is a standard technique for covering tracks.
 
@@ -1587,11 +1625,11 @@ dropped rather than forwarded.
 
 \subsection{Deployment}
 
-\begin{lstlisting}[style=shell,caption={HIGH side --- start this first}]
+\begin{lstlisting}[style=shell,caption={DESTINATION side --- start this first}]
 ./bin/ld_deamp 6514 127.0.0.1 514 --key "$DIODE_KEY"
 \end{lstlisting}
 
-\begin{lstlisting}[style=shell,caption={LOW side}]
+\begin{lstlisting}[style=shell,caption={SOURCE side}]
 ./bin/ld_amp 1514 192.168.10.2 6514 --key "$DIODE_KEY" \
              --batch 8 --parity 6 --interleave 8 --flush-ms 500
 \end{lstlisting}
@@ -1600,7 +1638,7 @@ dropped rather than forwarded.
 *.*  @192.168.10.1:1514
 \end{lstlisting}
 
-\begin{lstlisting}[style=conf,caption={HIGH host --- \file{/etc/rsyslog.d/10-diode-in.conf}}]
+\begin{lstlisting}[style=conf,caption={DESTINATION host --- \file{/etc/rsyslog.d/10-diode-in.conf}}]
 module(load="imudp")
 input(type="imudp" address="127.0.0.1" port="514")
 \end{lstlisting}
@@ -1671,7 +1709,7 @@ a gate an attacker can walk through by sending garbage.
 \item The key is 32 bytes, given as 64 hex characters, and must be identical
       on both sides. \cmd{openssl rand -hex 32}.
 \item There is no key exchange across a diode. Carry it by hand.
-\item Rotation means restarting both daemons; do the \highside{} side first so
+\item Rotation means restarting both daemons; do the \dstside{} side first so
       nothing is lost, and accept a brief window in which messages sealed with
       the old key are dropped.
 \item Nonce uniqueness rests on a per-run random salt from the OS CSPRNG plus
@@ -1706,11 +1744,11 @@ Link comes up, then flaps &
   Clean and reseat the ferrules first --- this is the usual cause by a wide
   margin. Only suspect overload if you are running long-range optics over a
   short fiber (\S\ref{sec:budget}). \\
-\highside{} receives nothing, LEDs all good &
+\dstside{} receives nothing, LEDs all good &
   ARP or firewall &
   \cmd{ip neigh show} must report PERMANENT. Check \cmd{rp\_filter} if the
-  two sides are on different subnets. \cmd{tcpdump} on the \highside{} NIC. \\
-\highside{} sees datagrams but emits no syslog &
+  two sides are on different subnets. \cmd{tcpdump} on the \dstside{} NIC. \\
+\dstside{} sees datagrams but emits no syslog &
   Tag verification failing &
   Keys differ between the two sides, or one side has \cmd{--key} and the
   other does not. \\
@@ -1725,13 +1763,13 @@ Whole groups of lines vanish together &
   Batch coupling &
   A failed block loses all $N$ records. Lower \cmd{--batch} or raise
   \cmd{--parity}. \\
-Broadcast storm on the \lowside{} segment &
+Broadcast storm on the \srcside{} segment &
   Topology A echo through a switch &
-  Connect the \lowside{} host directly to MC-A (\S\ref{sec:topoA}). \\
-\lowside{} host logs traffic from itself &
+  Connect the \srcside{} host directly to MC-A (\S\ref{sec:topoA}). \\
+\srcside{} host logs traffic from itself &
   Topology A echo, expected &
-  Harmless. Confirm the source is the \lowside{} host, not \highside{} --- if
-  it is \highside{}, stop and re-run \S\ref{sec:commission}. \\
+  Harmless. Confirm the source is the \srcside{} host, not \dstside{} --- if
+  it is \dstside{}, stop and re-run \S\ref{sec:commission}. \\
 \bottomrule
 \end{longtable}
 
