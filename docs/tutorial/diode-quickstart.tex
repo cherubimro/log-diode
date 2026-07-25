@@ -5,8 +5,11 @@
 %% Build:  make quickstart   (or  latexmk -pdf diode-quickstart.tex)
 
 \documentclass[11pt,a4paper]{article}
+\newcommand{\projectname}{log-diode}
 \newcommand{\doctitleshort}{Data Diode Quick Start}
 \input{common}
+\renewcommand{\amp}{\prog{ld\_amp}}
+\renewcommand{\deamp}{\prog{ld\_deamp}}
 
 \title{\vspace{-12mm}\textbf{Building a Data Diode: Quick Start}\\[2mm]
        \large A one-way syslog link in an afternoon}

@@ -7,8 +7,11 @@
 %% Build:  make handbook   (or  latexmk -pdf data-diode-handbook.tex)
 
 \documentclass[11pt,a4paper]{article}
+\newcommand{\projectname}{log-diode}
 \newcommand{\doctitleshort}{The Data Diode Handbook}
 \input{common}
+\renewcommand{\amp}{\prog{ld\_amp}}
+\renewcommand{\deamp}{\prog{ld\_deamp}}
 
 \title{\vspace{-12mm}\textbf{The Data Diode Handbook}\\[2mm]
        \large Software and hardware unidirectional links,\\

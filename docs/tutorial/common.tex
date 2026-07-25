@@ -1,7 +1,7 @@
 %% SPDX-License-Identifier: CC-BY-4.0
 %% Copyright (C) 2026  Alin-Adrian Anton <alin.anton@upt.ro>
 %%
-%% common.tex -- shared preamble for the log-diode tutorial documents.
+%% common.tex -- shared preamble for the diode tutorial documents.
 %% Input from the preamble of both diode-quickstart.tex and
 %% data-diode-handbook.tex.  Everything here must work with a stock
 %% TeX Live / texlive-collection-latexrecommended install; no external
@@ -39,7 +39,7 @@
 \fancyhf{}
 \fancyhead[L]{\footnotesize\textsc{\doctitleshort}}
 \fancyhead[R]{\footnotesize\thepage}
-\fancyfoot[C]{\footnotesize log-diode tutorial --- CC BY 4.0}
+\fancyfoot[C]{\footnotesize \projectname{} diode tutorial --- CC BY 4.0}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\footrulewidth}{0pt}
 
@@ -70,7 +70,7 @@
 \lstdefinestyle{shell}{
   language=bash,
   morekeywords={ip,nft,iptables,ip6tables,pfctl,sysctl,systemctl,tcpdump,arp,
-                ethtool,openssl,ld_amp,ld_deamp,rsyslogd,hping3,arping,nc,socat},
+                ethtool,openssl,hping3,arping,nc,socat},
 }
 \lstdefinestyle{conf}{
   language=,
@@ -136,8 +136,9 @@
 \newcommand{\cmd}[1]{\texttt{#1}}
 \newcommand{\file}[1]{\texttt{#1}}
 \newcommand{\prog}[1]{\textsf{#1}}
-\newcommand{\amp}{\prog{ld\_amp}}
-\newcommand{\deamp}{\prog{ld\_deamp}}
+%% Renewed per project, immediately after \input{common}.
+\newcommand{\amp}{\prog{sender}}
+\newcommand{\deamp}{\prog{receiver}}
 %% The two ends of the link, named by ROLE rather than by security level.
 %% A diode can be deployed in either orientation -- ingesting into a
 %% protected domain, or exporting out of one -- so the mechanics here are
