@@ -1069,36 +1069,45 @@ when to \emph{reduce} the light rather than worry about losing it:
 
 \begin{table}[h]
 \centering\small
-\begin{tabularx}{\textwidth}{@{}llccccX@{}}
+\begin{tabularx}{\textwidth}{@{}llcccccX@{}}
 \toprule
 \textbf{Model} & \textbf{Class} & \textbf{$\lambda$} &
-\textbf{TX min} & \textbf{RX sens.} & \textbf{Budget} & \textbf{Splitter} \\
+\textbf{TX min} & \textbf{TX max} & \textbf{RX sens.} & \textbf{RX max} &
+\textbf{Budget} \\
 \midrule
-MC100CM & 100BASE-FX  & \nm{1310} & \dbm{-20}  & \dbm{-31} & $\approx$\dbb{11}   &
-  commodity, cheap \\
-MC200CM & 1000BASE-SX & \nm{850}  & \dbm{-9.5} & \dbm{-17} & $\approx$\dbb{7.5}  &
-  special order, long lead time \\
-MC210CS & 1000BASE-LX & \nm{1310} & \dbm{-9.5} & \dbm{-20} & $\approx$\dbb{10.5} &
-  commodity, cheap \\
+MC100CM & 100BASE-FX  & \nm{1310} & \dbm{-20}   & \dbm{-14} & \dbm{-29} &
+  \dbm{-14} & $\approx$\dbb{9} \\
+MC200CM & 1000BASE-SX & \nm{850}  & \dbm{-9.5}  & \dbm{0}   & \dbm{-17} &
+  \dbm{0}   & $\approx$\dbb{7.5} \\
+MC210CS & 1000BASE-LX & \nm{1310} & \dbm{-11}   & \dbm{-3}  & \dbm{-19} &
+  \dbm{-3}  & $\approx$\dbb{8} \\
 \bottomrule
 \end{tabularx}
-\caption{Class-typical IEEE 802.3 figures --- verify against your unit's
-         datasheet. ``Budget'' is worst-case launch power minus worst-case
-         receiver sensitivity; all three absorb a $\approx$\dbb{4} splitter.
-         The last column is a procurement note, not a technical limit.}
+\caption{Figures for the \emph{optical class}, not for these units:
+         \textbf{TP-Link publishes no optical power data for the MC100CM,
+         MC200CM or MC210CS} --- their datasheets give only wavelength, fiber
+         type and distance. These are the published class specifications
+         \cite{ieee8023}; a particular module often does better. ``Budget''
+         is worst-case launch power minus worst-case receiver sensitivity.
+         All three have room for a $\approx$\dbb{4} splitter.}
 \end{table}
+
+Note the pattern in the two maximum columns: in every class the maximum launch
+power and the maximum receive power are the same number
+(\dbm{-14}, \dbm{0}, \dbm{-3}). That is deliberate, and it is what the
+attenuation advice below turns on.
 
 \begin{tipbox}[When to attenuate]
 A receiver has a maximum input power as well as a sensitivity floor, and
 exceeding it saturates the front end and raises the bit error rate --- which
 reaches the application as CRC failures and dropped frames.
 
-Within one optical class this is designed out: the standard sets the maximum
-launch power at or below the maximum receive power (\dbm{-14} against
-\dbm{-14} for 100BASE-FX, \dbm{-4} against \dbm{0} for 1000BASE-SX, \dbm{-3}
-against \dbm{-3} for 1000BASE-LX), so two matched short-reach converters
-cannot overload each other even over a metre of fiber. Three matched
-converters on a bench need no attenuation.
+Within one optical class this is designed out: maximum launch power equals
+maximum receive power in every class in the table above (\dbm{-14} for
+100BASE-FX, \dbm{0} for 1000BASE-SX, \dbm{-3} for 1000BASE-LX), so a
+compliant transmitter cannot overload a compliant receiver of the same class
+even over a metre of fiber. Three matched converters on a bench need no
+attenuation.
 
 The case that does need it is the paper's: a \emph{long-range} converter or
 SFP --- one built to drive tens of kilometres, and launching accordingly ---
@@ -1396,23 +1405,6 @@ changes what was proved: the capacities are part of the analyzed instance, so
 a shrunken build must be re-proved before any of the assurance claims in
 \S\ref{sec:threat} carry over to it.
 \end{notebox}
-
-\subsubsection{Why not UART, and definitely not I\textsuperscript{2}C}
-
-\begin{itemize}
-\item \textbf{UART} is the simpler cousin and a perfectly good diode: wire the
-      sender's TX to the receiver's RX, omit the other direction, and you have
-      two wires plus ground. Use it when the rate is low and both ends have
-      accurate enough clocks. SPI is preferable when you want higher
-      throughput, or when a constrained device's oscillator is not good enough
-      for reliable asynchronous framing --- SPI carries its clock, so there is
-      no baud-rate drift to manage. Note that hardware flow control
-      (\cmd{RTS}/\cmd{CTS}) must be disabled: those are back channels.
-\item \textbf{I\textsuperscript{2}C cannot be made into a diode at all.} It is
-      not a matter of omitting a wire: SDA is shared and bidirectional by
-      design, and the protocol \emph{requires} the receiver to pull it low to
-      acknowledge every byte. The back channel is mandatory. Do not try.
-\end{itemize}
 
 \subsubsection{Commissioning an SPI diode}
 
@@ -1805,9 +1797,12 @@ Y. Nir and A. Langley, ``ChaCha20 and Poly1305 for IETF Protocols'',
 RFC 8439, IETF, 2018.
 
 \bibitem{ieee8023}
-IEEE Std 802.3, \emph{IEEE Standard for Ethernet}, clauses 26 (100BASE-FX)
-and 38 (1000BASE-SX/LX). Source of the class-typical optical figures in
-\S\ref{sec:budget}.
+IEEE Std 802.3, \emph{IEEE Standard for Ethernet}: clause 26 and the FDDI PMD
+it adopts (100BASE-FX), and clause 38 (1000BASE-SX, 1000BASE-LX). Source of
+the per-class optical figures in \S\ref{sec:budget}. Those figures are class
+specifications: the vendor datasheets for the MC100CM, MC200CM and MC210CS
+give wavelength, fiber type and distance only, and publish no optical power
+data at all.
 
 \bibitem{etherled}
 M. Guri, ``ETHERLED: Sending Covert Morse Signals from Air-Gapped Devices via

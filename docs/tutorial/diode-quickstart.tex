@@ -427,8 +427,8 @@ TP-Link\newline MC200CM & 1\,Gb/s   & multi-mode  & \nm{850}  & SC &
   Gigabit, up to 550\,m on OM2. Works in both topologies --- but an \nm{850}
   splitter is a special order with a long lead time. \\
 TP-Link\newline MC210CS & 1\,Gb/s   & single-mode & \nm{1310} & SC &
-  Gigabit, up to 15\,km (check your revision). Cheap, commodity \nm{1310}
-  splitters. \\
+  Gigabit. TP-Link's own sources give both 15\,km and 20\,km --- check the
+  revision you buy. Cheap, commodity \nm{1310} splitters. \\
 \bottomrule
 \end{tabularx}
 \caption{Distances are vendor figures for a normal link; a diode's fibers are
@@ -445,9 +445,9 @@ centre-positive barrel). See Handbook \S5.6 for power, UPS and rack notes.
 
 \begin{tipbox}[Attenuators: only if you use long-range optics]
 Three \emph{matched} converters need no attenuation, however short the fiber:
-within an optical class the maximum launch power is set at or below the
-maximum receive power, so a compliant transmitter cannot overload a compliant
-receiver. If instead you use a long-range converter or SFP --- built to drive
+within an optical class the maximum launch power equals the maximum receive
+power, so a compliant transmitter cannot overload a compliant receiver of the
+same class. If instead you use a long-range converter or SFP --- built to drive
 tens of kilometres --- across the metre of fiber a diode needs, it can exceed
 the receiver's maximum input power, which shows up as CRC errors and dropped
 frames. Fixed attenuators (\dbb{3}, \dbb{5}, \dbb{10}) are the fix; size them
@@ -667,8 +667,7 @@ and the identical key file, carried across by hand.
 \item \textbf{Embedded and IoT.} Between two microcontrollers the diode is
       three wires: SPI with the MISO conductor omitted, optionally through
       optocouplers so each line is unidirectional in hardware. Handbook
-      \S5.8 --- including why the \emph{sender} must be the bus master, and
-      why I\textsuperscript{2}C can never be a diode.
+      \S5.8 --- including why the \emph{sender} must be the bus master.
 \item \textbf{Threat model.} What a diode does and does not protect against,
       including the insider and covert-channel discussion --- Handbook \S2.
 \item \textbf{iptables and pf.} Full equivalents of the nftables ruleset,
