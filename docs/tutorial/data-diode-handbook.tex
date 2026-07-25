@@ -1,0 +1,1841 @@
+%% SPDX-License-Identifier: CC-BY-4.0
+%% Copyright (C) 2026  Alin-Adrian Anton <alin.anton@upt.ro>
+%%
+%% data-diode-handbook.tex -- the reference document: threat model, software
+%% diodes (bench only), hardware diodes, optical budgets, commissioning, and
+%% integration with the log-diode SPARK/Ada tools.
+%% Build:  make handbook   (or  latexmk -pdf data-diode-handbook.tex)
+
+\documentclass[11pt,a4paper]{article}
+\newcommand{\doctitleshort}{The Data Diode Handbook}
+\input{common}
+
+\title{\vspace{-12mm}\textbf{The Data Diode Handbook}\\[2mm]
+       \large Software and hardware unidirectional links,\\
+       \large and the formally verified tools that run across them}
+\author{Alin-Adrian Anton \\
+        \small \texttt{alin.anton@upt.ro} \\
+        \small Computer and Information Technology Department\\
+        \small Politehnica University of Timi\c{s}oara}
+\date{\small Reference companion to \emph{Building a Data Diode: Quick Start}\\
+      \small Extends Anton, Csereoka, Capot\u{a} \& Cioarg\u{a},
+      \emph{Sensors} \textbf{24}(20), 6537 (2024)}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+\noindent
+A data diode enforces one-way information flow. This handbook covers how to
+build one, how to prove you have built one, and how to run useful traffic
+across it. It treats three families: \textbf{firewall-based diodes}
+(\prog{iptables}, \prog{nftables}, \prog{pf}); a \textbf{unidirectional
+layer-2 tunnel} built by bridging a TAP interface to each of two real
+Ethernet segments and forwarding frames with a program that has no reverse
+code path; and \textbf{physical diodes} --- commodity media converters between
+networks, or a three-wire SPI link between two microcontrollers. The first two
+are excellent bench instruments and are \emph{not} security boundaries; only
+the third survives a compromise of the hosts it separates. For the optical
+case it works through both published topologies --- two converters with a
+fiber splitter on the transmitter's return path, and three converters in a
+triangle --- with the power budgets, the attenuation they imply, and the
+procurement reality that actually decides between them. It closes with the
+transport problem a diode creates, and with \amp{}/\deamp{}: Ada/SPARK
+daemons whose parsing and reconstruction path is machine-checked free of
+run-time errors, because on a link with no feedback there is no second
+chance.
+\end{abstract}
+
+\vspace{2mm}
+{\small\tableofcontents}
+\clearpage
+
+%% =====================================================================
+\section{Scope}
+
+\subsection{What this document is}
+
+The \emph{Sensors} paper \cite{anton2024} describes an encrypted syslog
+transmission system across a unidirectional fiber link, and gives the
+essential recipe for the diode itself in its \S2.2: static ARP, addressing,
+and two media-converter topologies. This handbook expands that recipe into
+something you can hand to an engineer, and adds three things the paper does
+not cover:
+
+\begin{enumerate}
+\item \textbf{Software diodes.} The paper does not discuss them. Both the
+      firewall rulesets of \S\ref{sec:soft} and the bridged layer-2 tunnel of
+      \S\ref{sec:tap} are genuinely useful --- for development, CI and
+      teaching --- and genuinely dangerous if mistaken for the real thing, so
+      they get an honest chapter with an honest warning.
+\item \textbf{The optical practicalities.} \S\ref{sec:budget} gives the power
+      budgets, says when to reach for an attenuator, and is honest about the
+      part that actually gates a splitter build --- an \nm{850} multimode
+      splitter is a special order with a long lead time, while \nm{1310} ones
+      are catalogue stock.
+\item \textbf{Embedded scale.} Between two microcontrollers a media converter
+      is absurd. \S\ref{sec:spi} builds the same guarantee from three wires of
+      SPI, and explains why the sender --- not the receiver --- has to be the
+      bus master.
+\item \textbf{Commissioning.} How to \emph{prove} a link is one-way, rather
+      than believe it.
+\end{enumerate}
+
+\subsection{How to read it}
+
+The \emph{Quick Start} companion is the build sheet; this is the reference.
+If you want a working diode today, read that first and come back here for the
+reasoning. Sections \S\ref{sec:threat} and \S\ref{sec:commission} are the ones
+to read before anything goes into production.
+
+\subsection{Conventions}
+
+Throughout, \lowside{} is the lower-security network (where logs are produced,
+and where an attacker is assumed to be) and \highside{} is the higher-security
+network (where logs are collected and analysed). Information flows
+\lowside{}~$\rightarrow$~\highside{} only. Addresses are \cmd{192.168.10.1}
+(\lowside{}) and \cmd{192.168.10.2} (\highside{}); the diode-facing interface
+is \cmd{enp1s0} on Linux and \cmd{em0} on BSD.
+
+%% =====================================================================
+\section{Threat model and assurance tiers}
+\label{sec:threat}
+
+\subsection{The property being claimed}
+
+A data diode makes one claim: \emph{no information can travel from
+\highside{} to \lowside{}}. Everything else --- confidentiality, integrity,
+reliability --- is built on top of that claim by the software running across
+the link, not by the link itself.
+
+This is the Bell--LaPadula confidentiality model: no subject at the low level
+may read from the high level. The paper pairs it with a Biba-style integrity
+argument and write-once read-many storage on the \highside{} side, so that
+logs at rest cannot be altered even from within \highside{}
+\cite{anton2024}.
+
+\begin{notebox}[What a diode does not do]
+A diode says nothing about the \emph{truthfulness} of what crosses it. A
+compromised device on \lowside{} can send whatever it likes, including forged
+or replayed log lines. The diode guarantees only that the attacker cannot
+\emph{see} or \emph{reach} \highside{}. Authenticity of content is the
+cryptography's job (\S\ref{sec:integrate}), and the authenticity of the
+\emph{sender} depends on the security of the \lowside{} devices themselves.
+\end{notebox}
+
+\subsection{Three tiers, and where each fails}
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}p{28mm}p{34mm}X@{}}
+\toprule
+\textbf{Tier} & \textbf{Enforced by} & \textbf{How it fails} \\
+\midrule
+Application &
+  A daemon that chooses not to reply &
+  A bug, a configuration change, or code execution in the daemon. Offers
+  essentially no assurance; not treated further here. \\[3pt]
+Firewall &
+  A ruleset in the kernel &
+  Root compromise, \cmd{nft flush ruleset}, a configuration-management run, a
+  kernel or conntrack bug, an interface rename. Recovers a full return path
+  instantly and silently. \\[3pt]
+Layer-2 tunnel (\S\ref{sec:tap}) &
+  A forwarding program with no reverse code path &
+  Replacing the binary, or bridging both NICs together. Stronger than a
+  ruleset --- the reverse path is absent rather than forbidden --- but still
+  one command away for root on the forwarding host. \\[3pt]
+Physical\newline (optics, or SPI with MISO omitted) &
+  There is no transmitter, and no conductor, pointed the wrong way &
+  Someone rewires it, or fits the missing wire. Nothing software can do
+  restores the path. \\
+\bottomrule
+\end{tabularx}
+\caption{Assurance tiers. Only the optical tier survives a compromise of the
+         hosts it separates.}
+\end{table}
+
+The distinction matters because of \emph{who} you are defending against. If
+the adversary is a misconfigured application, a firewall diode helps. If the
+adversary has code execution on the \lowside{} host --- which is the entire
+premise of putting a diode between the log producers and the SOC --- then the
+firewall is inside the attacker's blast radius and the guarantee evaporates.
+As the paper puts it, the highest security diode enforces unidirectionality
+from physical properties and is immune from software exploits
+\cite{anton2024}.
+
+\subsection{Residual risks even with optics}
+
+\begin{itemize}
+\item \textbf{Rewiring.} A person with physical access can restore a return
+      path in seconds. This is the paper's ``unintentional insider'': an
+      administrator who tidies the cables. Mitigation is procedural ---
+      labelling, tamper-evident seals, locked enclosures, and the audit in
+      \S\ref{sec:commission}.
+\item \textbf{Covert channels.} A colluding insider can exfiltrate through
+      channels the diode does not model: NIC LEDs \cite{etherled}, Ethernet
+      cable emissions \cite{lantenna}, power lines \cite{powerhammer}, and
+      memory-bus emissions picked up by a nearby phone \cite{gsmem}. A diode
+      is not a TEMPEST control.
+\item \textbf{Loss.} A one-way link cannot retransmit. Loss beyond the error
+      code's capacity is unrecoverable. This is the honest failure mode of a
+      diode and is a design constraint, not a defect.
+\item \textbf{No diagnostics.} Nothing can report back. Failure is silent by
+      construction; see \S\ref{sec:maint}.
+\item \textbf{Availability.} Every converter is a point of failure, and a
+      three-converter diode has three of them.
+\end{itemize}
+
+%% =====================================================================
+\section{Why the transport looks the way it does}
+
+Remove the return path and a surprising amount of ordinary networking stops
+working. It is worth being explicit, because every one of these becomes a
+configuration task.
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}p{30mm}X@{}}
+\toprule
+\textbf{What breaks} & \textbf{Consequence} \\
+\midrule
+TCP & No handshake, so no TCP at all. Everything must be UDP or a raw
+       protocol. \\
+ARP & The sender never learns the receiver's MAC. Must be configured
+      statically --- this is why \file{/etc/ethers} appears in every recipe
+      here. \\
+ICMP & No \cmd{ping}, no path MTU discovery. Set the MTU by hand and keep
+       datagrams comfortably under it. \\
+DNS, NTP, DHCP & All require a reply. Use static addressing, static
+       \file{/etc/hosts}, and an \highside{}-local time source. \\
+Retransmission & Nothing can be requested again. Redundancy has to be sent
+       \emph{in advance}. \\
+Key exchange & No Diffie--Hellman, no TLS. Keys are pre-shared out of band. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The last two shape the software. Since a lost datagram is lost forever, the
+sender must decide up front how much redundancy to spend. The paper's answer
+was a repeat factor: send each message $R$ times. The tools described in
+\S\ref{sec:integrate} improve on it in two ways --- a Reed--Solomon erasure
+code, so that any $K$ of $K+M$ fragments rebuild the message rather than
+needing one intact copy; and interleaving, so that a burst of loss cannot
+consume every copy of the same message.
+
+%% =====================================================================
+\section{Software diodes}
+\label{sec:soft}
+
+\begin{labbox}[This entire section is for the bench]
+A firewall diode enforces direction with a mutable ruleset inside a kernel
+that the attacker may be able to reach. \cmd{nft flush ruleset} is one
+command. A configuration-management run that re-applies a site-wide policy is
+one mistake. Treat everything below as a \textbf{laboratory and CI
+instrument}: it lets you develop against \amp{}/\deamp{}, write integration
+tests, and teach the topology without buying hardware. It is not a boundary
+between two security domains. For that, build \S\ref{sec:hard}.
+\end{labbox}
+
+\subsection{The one principle}
+
+Every ruleset in this section obeys a single negative rule:
+
+\begin{center}
+\emph{Nothing on the diode interface may create or consult connection state.}
+\end{center}
+
+A conntrack entry, an \cmd{ESTABLISHED,RELATED} accept, or a pf
+\cmd{keep state} exists precisely to let the reply through. So does a TCP RST
+and an ICMP port-unreachable --- both are packets travelling the wrong way,
+and both leak information (they tell the \highside{} side that something is
+listening). Stateless, silent dropping is the only correct behaviour.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+  \node[host] (low) {LOW host\\\scriptsize 192.168.10.1};
+  \node[host, right=45mm of low] (high) {HIGH host\\\scriptsize 192.168.10.2};
+  \draw[dataflow] (low) -- node[lbl,above]{UDP 6514 only}
+                           node[lbl,below]{no state, no conntrack} (high);
+  \draw[blocked] (high.south) to[out=-150,in=-30]
+        node[midway,fill=white,inner sep=1pt]{\xmark}
+        node[lbl,below=3.5mm]{OUTPUT policy drop \emph{and} INPUT policy drop} (low.south);
+  \node[lbl, above=9mm of $(low)!0.5!(high)$, align=center, text=ldamber!70!black]
+       {\textbf{enforced by a ruleset --- revocable by whoever owns root}};
+\end{tikzpicture}
+\caption{The software diode. The asymmetry is real but it lives in mutable
+         kernel state.}
+\end{figure}
+
+\subsection{Link-layer preparation (all platforms)}
+\label{sec:linklayer}
+
+This layer is needed for hardware diodes too --- with no return path, address
+resolution has to be done by hand.
+
+\subsubsection{Linux}
+
+Record the peer's MAC in \file{/etc/ethers} on each host (\lowside{} records
+\highside{}'s, and vice versa):
+
+\begin{lstlisting}[style=conf]
+# /etc/ethers on the LOW host
+bb:bb:bb:bb:bb:bb 192.168.10.2
+\end{lstlisting}
+
+\begin{lstlisting}[style=shell]
+ip addr add 192.168.10.1/24 dev enp1s0     # .2/24 on the HIGH host
+ip link set enp1s0 up
+arp -f /etc/ethers                          # net-tools package
+ip neigh show dev enp1s0                    # must report PERMANENT
+\end{lstlisting}
+
+The paper loads this from \file{/etc/rc.local} via a \cmd{rc-local.service}
+shim \cite{anton2024}; a dedicated unit is cleaner on a modern system:
+
+\begin{lstlisting}[style=conf,caption={\file{/etc/systemd/system/diode-link.service}}]
+[Unit]
+Description=Static ARP and addressing for the diode link
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/arp -f /etc/ethers
+
+[Install]
+WantedBy=multi-user.target
+\end{lstlisting}
+
+Then quieten the interface:
+
+\begin{lstlisting}[style=conf,caption={\file{/etc/sysctl.d/90-diode.conf}}]
+# Never answer an ARP request on the diode NIC; never volunteer our address.
+net.ipv4.conf.enp1s0.arp_ignore   = 8
+net.ipv4.conf.enp1s0.arp_announce = 2
+
+# IPv6 is chatty and inherently bidirectional (NDP, RA). Turn it off here.
+net.ipv6.conf.enp1s0.disable_ipv6 = 1
+
+net.ipv4.conf.enp1s0.accept_redirects    = 0
+net.ipv4.conf.enp1s0.send_redirects      = 0
+net.ipv4.conf.enp1s0.accept_source_route = 0
+\end{lstlisting}
+
+\begin{warnbox}[Reverse-path filtering]
+Leave \cmd{rp\_filter} alone unless you know your topology needs it. In the
+symmetric-subnet layout used here, strict reverse-path filtering
+(\cmd{rp\_filter=1}) passes, because the route to the peer's source address
+does point out of \cmd{enp1s0}. If you place the two sides in \emph{different}
+subnets --- a common choice, since routing back is impossible anyway --- strict
+RPF will silently discard every arriving datagram on the \highside{} host.
+That failure looks exactly like a broken diode. Set
+\cmd{net.ipv4.conf.enp1s0.rp\_filter = 0} in that case and note it in the
+commissioning record.
+\end{warnbox}
+
+If your distribution runs \prog{NetworkManager}, exclude the diode interface
+so it does not re-apply DHCP or IPv6 autoconfiguration behind your back:
+
+\begin{lstlisting}[style=conf,caption={\file{/etc/NetworkManager/conf.d/90-diode.conf}}]
+[keyfile]
+unmanaged-devices=interface-name:enp1s0
+\end{lstlisting}
+
+\subsubsection{BSD}
+
+\begin{lstlisting}[style=shell,caption={OpenBSD}]
+ifconfig em0 inet 192.168.10.1/24 up
+arp -s 192.168.10.2 bb:bb:bb:bb:bb:bb permanent
+# persist: /etc/hostname.em0 for the address, /etc/rc.local for the arp entry
+\end{lstlisting}
+
+\begin{lstlisting}[style=conf,caption={FreeBSD \file{/etc/rc.conf}}]
+ifconfig_em0="inet 192.168.10.1 netmask 255.255.255.0"
+static_arp_pairs="diodepeer"
+static_arp_diodepeer="192.168.10.2 bb:bb:bb:bb:bb:bb"
+pf_enable="YES"
+pf_rules="/etc/pf.conf"
+\end{lstlisting}
+
+\subsection{nftables}
+
+\prog{nftables} is the recommended Linux option, for one reason that
+\prog{iptables} cannot match: the \cmd{netdev} family's \cmd{ingress} hook
+sees \emph{every} frame, including ARP, LLDP and IPv6, before the IP stack
+does. A single \cmd{policy drop} there makes the interface deaf at the link
+layer.
+
+\begin{lstlisting}[style=nft,caption={\file{/etc/nftables.conf} --- LOW host (transmit only)}]
+#!/usr/sbin/nft -f
+flush ruleset
+
+define PEER = 192.168.10.2
+define PORT = 6514
+
+# Link-layer deafness. Note: the device name cannot be a variable in
+# older nft releases, so it is spelled out here.
+table netdev diodeguard {
+    chain ingress {
+        type filter hook ingress device enp1s0 priority -500; policy drop;
+    }
+}
+
+table inet diode {
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iif lo accept
+        iifname "enp1s0" counter drop
+    }
+    chain output {
+        type filter hook output priority filter; policy drop;
+        oif lo accept
+        oifname "enp1s0" ip daddr $PEER udp dport $PORT counter accept
+        oifname "enp1s0" counter drop
+    }
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[style=nft,caption={\file{/etc/nftables.conf} --- HIGH host (receive only)}]
+#!/usr/sbin/nft -f
+flush ruleset
+
+define PEER = 192.168.10.1
+define PORT = 6514
+
+table inet diode {
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iif lo accept
+        iifname "enp1s0" ip saddr $PEER udp dport $PORT counter accept
+        iifname "enp1s0" counter drop
+    }
+    chain output {
+        type filter hook output priority filter; policy drop;
+        oif lo accept
+        # Absolutely nothing leaves by the diode NIC.
+        oifname "enp1s0" counter drop
+    }
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+}
+\end{lstlisting}
+
+The \cmd{counter} keywords are not decoration. After a test run,
+\cmd{nft list ruleset} shows how many packets each rule matched; a non-zero
+counter on the \highside{} host's output-drop rule is direct evidence that
+something tried to talk backwards.
+
+\begin{lstlisting}[style=shell]
+systemctl enable --now nftables
+nft list ruleset            # always read back what actually loaded
+nft list ruleset | grep -c "ct state"   # must print 0
+\end{lstlisting}
+
+\subsection{iptables}
+
+Still widespread, and named explicitly in many site standards. The rules are
+a direct transliteration, with one important gap.
+
+\begin{lstlisting}[style=shell,caption={LOW host}]
+iptables -F && iptables -X
+iptables -P INPUT   DROP
+iptables -P OUTPUT  DROP
+iptables -P FORWARD DROP
+
+iptables -A INPUT  -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# Nothing arriving on the diode NIC is ever accepted.
+iptables -A INPUT  -i enp1s0 -j DROP
+
+# Exactly one thing may leave by it.
+iptables -A OUTPUT -o enp1s0 -p udp -d 192.168.10.2 --dport 6514 -j ACCEPT
+iptables -A OUTPUT -o enp1s0 -j DROP
+
+# IPv6 off entirely.
+ip6tables -P INPUT DROP; ip6tables -P OUTPUT DROP; ip6tables -P FORWARD DROP
+\end{lstlisting}
+
+\begin{lstlisting}[style=shell,caption={HIGH host}]
+iptables -F && iptables -X
+iptables -P INPUT   DROP
+iptables -P OUTPUT  DROP
+iptables -P FORWARD DROP
+
+iptables -A INPUT  -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+iptables -A INPUT  -i enp1s0 -p udp -s 192.168.10.1 --dport 6514 -j ACCEPT
+iptables -A INPUT  -i enp1s0 -j DROP
+iptables -A OUTPUT -o enp1s0 -j DROP
+
+ip6tables -P INPUT DROP; ip6tables -P OUTPUT DROP; ip6tables -P FORWARD DROP
+\end{lstlisting}
+
+\begin{warnbox}[iptables cannot filter ARP]
+\prog{iptables} operates on IP. ARP traffic passes it untouched, so on
+\prog{iptables} alone the \highside{} host will still answer ARP requests
+across the link --- a working, if narrow, return channel. Close it with
+\prog{arptables} (or \prog{ebtables}), or use \prog{nftables}, whose
+\cmd{netdev} ingress hook covers all of it:
+\begin{lstlisting}[style=shell]
+arptables -P INPUT DROP
+arptables -P OUTPUT DROP
+\end{lstlisting}
+The \cmd{arp\_ignore=8} sysctl in \S\ref{sec:linklayer} is a second layer for
+the same problem, and should be applied regardless.
+\end{warnbox}
+
+Note also that \cmd{-P OUTPUT DROP} is host-wide. If the machine has a
+management interface, add explicit accepts for it before you apply this over
+SSH.
+
+\subsection{pf (OpenBSD and FreeBSD)}
+
+\prog{pf} makes the stateless requirement explicit and readable, and it has a
+setting that matters more here than anywhere else: \cmd{set block-policy drop}.
+The alternative, \cmd{return}, answers blocked traffic with TCP RSTs and ICMP
+unreachables --- packets flowing the wrong way.
+
+\begin{lstlisting}[style=pf,caption={\file{/etc/pf.conf} --- LOW host}]
+diode_if = "em0"
+peer     = "192.168.10.2"
+port     = 6514
+
+# Silence. Never answer with an RST or an ICMP unreachable: that is a
+# packet travelling from HIGH to LOW.
+set block-policy drop
+set skip on lo
+
+block all
+
+# The single permitted flow. "no state" is the whole point -- a state
+# table entry exists to let the reply back in.
+pass out quick on $diode_if inet proto udp \
+     from ($diode_if) to $peer port $port no state
+
+block in  quick on $diode_if all
+block out quick on $diode_if all
+\end{lstlisting}
+
+\begin{lstlisting}[style=pf,caption={\file{/etc/pf.conf} --- HIGH host}]
+diode_if = "em0"
+peer     = "192.168.10.1"
+port     = 6514
+
+set block-policy drop
+set skip on lo
+
+block all
+
+pass in quick on $diode_if inet proto udp \
+     from $peer to ($diode_if) port $port no state
+
+block out quick on $diode_if all
+\end{lstlisting}
+
+\begin{lstlisting}[style=shell]
+pfctl -nf /etc/pf.conf      # syntax check first
+pfctl -f  /etc/pf.conf
+pfctl -sr                   # read back the loaded rules
+pfctl -si | grep -i state   # state table should stay empty
+\end{lstlisting}
+
+\paragraph{OpenBSD versus FreeBSD.} The syntax above works on both.
+Differences worth knowing: OpenBSD enables \prog{pf} by default and loads
+\file{/etc/pf.conf} at boot, while FreeBSD needs \cmd{pf\_enable="YES"} in
+\file{/etc/rc.conf}. FreeBSD's \prog{pf} is a fork of an older OpenBSD
+release, so newer OpenBSD-only syntax will not parse there --- everything used
+here predates the split. Interface names differ (\cmd{em0}, \cmd{igb0},
+\cmd{re0}, \cmd{vtnet0}). FreeBSD users who prefer \prog{ipfw} can express the
+same policy with \cmd{ipfw add deny ip from any to any in via em0} on the
+\lowside{} host; the stateless requirement is identical --- do not use
+\cmd{keep-state} or \cmd{check-state}.
+
+\subsection{A diode in network namespaces, for CI}
+
+The cheapest possible bench: one machine, no hardware, reproducible in a test
+script.
+
+\begin{lstlisting}[style=shell]
+ip netns add low
+ip netns add high
+ip link add veth-low type veth peer name veth-high
+ip link set veth-low  netns low
+ip link set veth-high netns high
+
+ip -n low  addr add 192.168.10.1/24 dev veth-low
+ip -n high addr add 192.168.10.2/24 dev veth-high
+ip -n low  link set veth-low  up ; ip -n low  link set lo up
+ip -n high link set veth-high up ; ip -n high link set lo up
+
+# Static neighbours: no ARP anywhere.
+LMAC=$(ip -n low  link show veth-low  | awk '/link\/ether/{print $2}')
+HMAC=$(ip -n high link show veth-high | awk '/link\/ether/{print $2}')
+ip -n low  neigh replace 192.168.10.2 lladdr "$HMAC" dev veth-low  nud permanent
+ip -n high neigh replace 192.168.10.1 lladdr "$LMAC" dev veth-high nud permanent
+
+# Apply the per-side rulesets from above.
+ip netns exec low  nft -f /etc/nftables-low.conf
+ip netns exec high nft -f /etc/nftables-high.conf
+
+# Run the daemons.
+ip netns exec high ./bin/ld_deamp 6514 127.0.0.1 514 --key "$KEY" &
+ip netns exec low  ./bin/ld_amp 1514 192.168.10.2 6514 --key "$KEY" &
+\end{lstlisting}
+
+This is the arrangement \file{tools/loopback-test.sh} approximates on plain
+loopback; namespaces add the interface-scoped rules, which is what you want
+when testing the firewall policy itself rather than the codec.
+
+\subsection{A unidirectional layer-2 tunnel with TAP}
+\label{sec:tap}
+
+Everything so far filters at layer 3 and relies on a ruleset staying in place.
+There is a better software construction: bridge a TAP interface to each of two
+\emph{real} Ethernet segments and forward frames between the taps with a
+program that has no reverse code path. The result is a unidirectional
+layer-2 tunnel --- the same Ethernet semantics as the optical diode of
+\S\ref{sec:hard}, with software standing in for the missing transmitter.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[node distance=7mm]
+  %% top row: the LOW segment feeds the input tap
+  \node[host, minimum width=20mm] (lseg) {LOW\\segment};
+  \node[mc, minimum width=14mm, right=of lseg] (e0) {eth0};
+  \node[mc, minimum width=18mm, right=of e0, fill=ldblue!8] (brl) {br-low};
+  \node[mc, minimum width=19mm, right=of brl, fill=ldamber!12,
+        draw=ldamber] (tl) {tapdlow};
+  %% bottom row: the output tap feeds the HIGH segment (flows right to left)
+  \node[host, minimum width=20mm, below=24mm of lseg] (hseg) {HIGH\\segment};
+  \node[mc, minimum width=14mm, right=of hseg] (e1) {eth1};
+  \node[mc, minimum width=18mm, right=of e1, fill=ldblue!8] (brh) {br-high};
+  \node[mc, minimum width=19mm, right=of brh, fill=ldamber!12,
+        draw=ldamber] (th) {tapdhigh};
+  %% the forwarder, between the two rows
+  \node[mc, minimum width=24mm, minimum height=15mm, fill=ldgreen!10,
+        draw=ldgreen, right=13mm of $(tl)!0.5!(th)$] (d) {\textbf{tapdiode}};
+
+  \draw[dataflow] (lseg)--(e0); \draw[dataflow] (e0)--(brl);
+  \draw[dataflow] (brl)--(tl);
+  \draw[dataflow] (tl.east)--(d.north west);
+  \draw[dataflow] (d.south west)--(th.east);
+  \draw[dataflow] (th)--(brh); \draw[dataflow] (brh)--(e1);
+  \draw[dataflow] (e1)--(hseg);
+
+  \node[lbl, below=1.5mm of d, align=center, text=ldgreen!45!black]
+       {reads \texttt{in\_fd},\\writes \texttt{out\_fd},\\never the reverse};
+  \draw[blocked] (hseg.west) to[out=180,in=180]
+        node[midway,fill=white,inner sep=1pt]{\xmark} (lseg.west);
+\end{tikzpicture}
+\caption{A unidirectional layer-2 tunnel. Each tap is bridged to a real NIC,
+         so two physical Ethernet segments are joined --- in one direction.}
+\label{fig:tap}
+\end{figure}
+
+\subsubsection{Why this is a stronger software construction}
+
+A firewall diode is a \emph{policy} statement: the path exists and a rule
+forbids it. This is a \emph{structural} one: the program holds two file
+descriptors, reads only the first and writes only the second. The reverse
+direction is not disabled or filtered --- it is absent. Nothing to flush,
+nothing to misconfigure, and reviewing it means reading eighty lines rather
+than auditing a ruleset against a kernel's conntrack behaviour.
+
+\begin{labbox}[It is still software, and still not a security boundary]
+The binary can be replaced, \cmd{ptrace}d, or simply bypassed by adding both
+NICs to one bridge --- all of which are one command for root on the forwarding
+host. It belongs in the same tier as \S\ref{sec:soft}: excellent for a bench,
+for CI, and for teaching the layer-2 semantics of a diode. When the guarantee
+has to survive a compromise of the host, only optics do that.
+\end{labbox}
+
+\subsubsection{The forwarder}
+
+The forwarder is about a hundred lines. It attaches to two existing TAP
+devices, then copies frames from the first to the second for as long as it
+runs. Table~\ref{tab:tapnotes} covers the choices in it that are not obvious
+from the source.
+
+\begin{lstlisting}[style=c,label={lst:tapdiode},caption={%
+  \file{tapdiode.c} --- a one-way layer-2 forwarder. Build with
+  \cmd{cc -O2 -Wall -Wextra -pedantic -std=c11 -o tapdiode tapdiode.c}}]
+/* tapdiode -- a layer-2 one-way bridge between two TAP interfaces.
+ *
+ * Frames read from the LOW tap are written to the HIGH tap.  The reverse
+ * direction is not disabled, commented out, or filtered: it is absent.
+ * out_fd is never read from and never appears in a pollfd, so there is no
+ * code path along which a frame could travel HIGH -> LOW.
+ *
+ * Both taps must already exist and be bridged to different Ethernet
+ * segments -- see the bridge setup below.
+ */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+
+#include <net/if.h>          /* IFNAMSIZ, struct ifreq -- NOT linux/if.h */
+#include <linux/if_tun.h>
+
+#define FRAME_MAX 65536      /* jumbo frame + VLAN tags, with room to spare */
+
+static volatile sig_atomic_t stop_requested;
+
+static void on_signal(int sig) { (void) sig; stop_requested = 1; }
+
+/* Attach to the existing TAP device `name'.  Returns a descriptor, or -1. */
+static int tap_attach(const char *name)
+{
+    struct ifreq ifr;
+    size_t len = strlen(name);
+    int fd;
+
+    /* ifr_name is IFNAMSIZ bytes; validate before copying into it. */
+    if (len == 0 || len >= IFNAMSIZ) {
+        fprintf(stderr, "tapdiode: bad interface name '%s' (1..%d chars)\n",
+                name, IFNAMSIZ - 1);
+        return -1;
+    }
+
+    fd = open("/dev/net/tun", O_RDWR | O_CLOEXEC);
+    if (fd < 0) { perror("tapdiode: open /dev/net/tun"); return -1; }
+
+    memset(&ifr, 0, sizeof ifr);
+    /* IFF_TAP   -- layer 2; the buffer is a whole Ethernet frame.
+     * IFF_NO_PI -- no 4-byte struct tun_pi prefix to skip. */
+    ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
+    memcpy(ifr.ifr_name, name, len + 1);
+
+    if (ioctl(fd, TUNSETIFF, &ifr) < 0) {
+        fprintf(stderr, "tapdiode: TUNSETIFF %s: %s\n", name, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+int main(int argc, char **argv)
+{
+    static unsigned char frame[FRAME_MAX];
+    unsigned long long forwarded = 0, bytes = 0, lost = 0;
+    struct sigaction sa;
+    struct pollfd pfd;
+    int in_fd, out_fd;
+
+    if (argc != 3) {
+        fprintf(stderr, "usage: %s <low-tap> <high-tap>\n"
+                        "  Forwards Ethernet frames low -> high only.\n", argv[0]);
+        return 2;
+    }
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_signal;
+    if (sigaction(SIGINT, &sa, NULL) < 0 || sigaction(SIGTERM, &sa, NULL) < 0) {
+        perror("tapdiode: sigaction");
+        return 1;
+    }
+
+    if ((in_fd = tap_attach(argv[1])) < 0) return 1;
+    if ((out_fd = tap_attach(argv[2])) < 0) { close(in_fd); return 1; }
+
+    fprintf(stderr, "tapdiode: %s -> %s, one way (no reverse code path)\n",
+            argv[1], argv[2]);
+
+    /* The input descriptor is the only thing ever polled, and only for
+     * readability.  out_fd is write-only by construction. */
+    pfd.fd = in_fd;
+    pfd.events = POLLIN;
+
+    while (!stop_requested) {
+        ssize_t n, w;
+
+        if (poll(&pfd, 1, -1) < 0) {
+            if (errno == EINTR) continue;
+            perror("tapdiode: poll");
+            break;
+        }
+
+        n = read(in_fd, frame, sizeof frame);
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            perror("tapdiode: read");
+            break;
+        }
+        if (n == 0) continue;
+
+        w = write(out_fd, frame, (size_t) n);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            /* A full queue downstream is loss, which is the honest failure
+             * mode of a diode.  Count it; never block, never signal back. */
+            lost++;
+            continue;
+        }
+        if (w != n) { lost++; continue; }   /* short write: frame malformed */
+        forwarded++;
+        bytes += (unsigned long long) n;
+    }
+
+    fprintf(stderr, "tapdiode: forwarded %llu frames (%llu bytes), lost %llu\n",
+            forwarded, bytes, lost);
+    close(in_fd);
+    close(out_fd);
+    return 0;
+}
+\end{lstlisting}
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}p{40mm}X@{}}
+\toprule
+\textbf{Choice} & \textbf{Reason} \\
+\midrule
+Only \cmd{in\_fd} is polled &
+  \cmd{out\_fd} never appears in a \cmd{pollfd} and \cmd{read()} is never
+  called on it, so one-wayness is a property of the control flow --- visible
+  to anyone reading the loop, and not dependent on configuration. \\[3pt]
+\cmd{poll()} rather than \cmd{select()} &
+  No \cmd{FD\_SETSIZE} ceiling, no \cmd{fd\_set} to rebuild each iteration,
+  and the intent --- one descriptor, readability only --- is explicit in the
+  call. \\[3pt]
+\cmd{IFF\_NO\_PI} &
+  Suppresses the 4-byte \cmd{struct tun\_pi} prefix, so the buffer holds
+  exactly the Ethernet frame and nothing has to be skipped on either
+  side. \\[3pt]
+Interface names as arguments &
+  Bridge membership and addressing can be scripted deterministically instead
+  of depending on which \cmd{tapN} the kernel happens to assign. \\[3pt]
+Name length checked against \cmd{IFNAMSIZ} &
+  \cmd{ifr\_name} is a fixed 16-byte field; the check keeps the copy into it
+  bounded. \\[3pt]
+\cmd{<net/if.h>}, not \cmd{<linux/if.h>} &
+  The glibc and kernel headers define overlapping structures; mixing them
+  fails to compile on a current toolchain. \\[3pt]
+\cmd{EINTR} retried; every syscall checked &
+  A signal must not be mistaken for a closed device, and a failed
+  \cmd{read()} must never reach \cmd{write()} as a length. \\[3pt]
+Write failure counted, never retried &
+  A full queue downstream is loss, and loss is the honest failure mode of a
+  diode. Blocking or signalling upstream would both be worse. \\[3pt]
+Counters, not a per-frame \cmd{printf} &
+  Per-frame output would dominate the runtime; totals are reported once, on
+  exit. \\[3pt]
+\cmd{O\_CLOEXEC}, signal handling, 64\,KiB buffer &
+  Descriptors do not leak across an \cmd{exec}; \cmd{SIGINT}/\cmd{SIGTERM}
+  produce a clean summary; jumbo frames and VLAN tags fit with room to
+  spare. \\
+\bottomrule
+\end{tabularx}
+\caption{Design notes for Listing~\ref{lst:tapdiode}.}
+\label{tab:tapnotes}
+\end{table}
+
+\subsubsection{Bridging it to real interfaces}
+
+\begin{lstlisting}[style=shell,caption={On the forwarding host}]
+# One tap per side.  Persistent, so they can be bridged before tapdiode runs.
+ip tuntap add dev tapdlow  mode tap
+ip tuntap add dev tapdhigh mode tap
+
+# One bridge per side.  STP off: BPDUs are bidirectional signalling and have
+# no business on a diode.
+ip link add br-low  type bridge stp_state 0
+ip link add br-high type bridge stp_state 0
+
+ip link set eth0     master br-low     # NIC facing the LOW segment
+ip link set tapdlow  master br-low
+ip link set eth1     master br-high    # NIC facing the HIGH segment
+ip link set tapdhigh master br-high
+
+for i in eth0 eth1 tapdlow tapdhigh br-low br-high; do ip link set "$i" up; done
+
+# The forwarding host is a pure layer-2 device: give it no address on either
+# side, and no IPv6, so it is not itself reachable from either segment.
+for i in br-low br-high eth0 eth1 tapdlow tapdhigh; do
+    sysctl -qw "net.ipv6.conf.$i.disable_ipv6=1"
+done
+
+./tapdiode tapdlow tapdhigh
+\end{lstlisting}
+
+The two segments then carry the addressing, and because this is a layer-2
+tunnel the hosts on either side are configured exactly as for the optical
+diode: same subnet, static neighbour entries, no ARP (\S\ref{sec:linklayer}).
+
+\begin{notebox}[Two bridges, never one]
+The whole construction rests on \cmd{br-low} and \cmd{br-high} being separate
+bridges. Adding \cmd{eth0} and \cmd{eth1} to the \emph{same} bridge produces
+an ordinary bidirectional bridge and silently destroys the property --- and it
+is a single command. If you script this, assert the membership afterwards:
+\cmd{bridge link show} must never list \cmd{eth0} and \cmd{eth1} under one
+master.
+\end{notebox}
+
+\begin{notebox}[Frames from HIGH do enter tapdhigh, and stop there]
+\cmd{br-high} forwards \highside{} traffic toward \cmd{tapdhigh}, so those
+frames land in that tap's transmit queue --- where nothing ever reads them,
+because \cmd{tapdiode} never calls \cmd{read()} on \cmd{out\_fd}. The queue
+fills and the kernel discards them. This costs a little memory and no
+security: a tap's transmit and receive queues are independent, so an unread
+queue cannot exert backpressure on the writes going the other way. If the
+waste offends, drop the traffic at the bridge with an \prog{nftables}
+\cmd{bridge}-family rule on egress toward \cmd{tapdhigh}.
+\end{notebox}
+
+\subsubsection{Verifying it}
+
+Layer 2 needs a layer-2 test; \cmd{ping} proves nothing about frames the IP
+stack never generates. Inject a tagged frame with a distinctive EtherType on
+one segment and sniff for it on the other:
+
+\begin{lstlisting}[style=shell]
+# On the HIGH segment: capture (EtherType 0x88b5 is reserved for local use)
+tcpdump -ni eth0 -e 'ether proto 0x88b5'
+
+# On the LOW segment: inject one frame
+python3 - <<'PY'
+import socket
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW); s.bind(('eth0', 0))
+s.send(b'\xff'*6 + b'\x02\x00\x00\x00\x00\x01' + b'\x88\xb5' + b'DIODETEST')
+PY
+\end{lstlisting}
+
+The frame must appear on the \highside{} segment. Then reverse the two
+commands: injecting on \highside{} must produce \emph{nothing} on \lowside{},
+while a capture on \cmd{br-high} confirms the frame really was injected --- so
+that a silent \lowside{} means one-wayness and not a broken injector.
+
+\begin{tipbox}
+Sniff with \cmd{socket.htons(3)} if you write the capture side in Python. The
+\cmd{AF\_PACKET} protocol argument is in network byte order and Python does
+not convert it, so a literal \cmd{3} binds to EtherType \cmd{0x0300} and sees
+nothing --- a mistake that looks exactly like a failed diode.
+\end{tipbox}
+
+%% =====================================================================
+\section{Hardware diodes}
+\label{sec:hard}
+
+\subsection{What a media converter is, and which ones work}
+
+A media converter bridges copper Ethernet and optical fiber. Internally it is
+two transceivers back to back: copper in $\rightarrow$ fiber out, fiber in
+$\rightarrow$ copper out. The optical side is what interests us, and only one
+kind of optical side can be used.
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}p{40mm}p{20mm}X@{}}
+\toprule
+\textbf{Optical interface} & \textbf{Usable?} & \textbf{Why} \\
+\midrule
+Dual-fiber, discrete TX and RX ports (two SC or two LC ferrules) &
+  \textbf{Yes} &
+  TX and RX are physically separate. You can connect one and not the other ---
+  which is the entire mechanism of an optical diode. \\[3pt]
+Single-fiber bidirectional (BiDi / WDM, one strand, e.g.\ \nm{1310} out and
+\nm{1550} back) &
+  \textbf{No} &
+  Both directions share one connector and one strand, separated only by
+  wavelength inside the module. There is no TX-only path to expose. \\
+\bottomrule
+\end{tabularx}
+\caption{Only two-strand converters with separate TX and RX ports can build a
+         diode. Single-port BiDi models cannot, at any price.}
+\end{table}
+
+The obstacle is that a converter with nothing on its RX port sees no carrier,
+declares the fiber link down, and stops forwarding. The paper records this
+directly: converters with a disconnected RX port ``will automatically turn off
+unless electronic hacks are in place'' \cite{anton2024}. So a diode is not
+built by omitting a cable. It is built by feeding the transmitter light that
+carries no information from the far side. There are exactly two ways to do
+that, and they are the next two subsections.
+
+\subsection{Topology A --- two converters and a fiber splitter}
+\label{sec:topoA}
+
+Split the transmitter's own outgoing light and feed half of it back into the
+transmitter's own receiver. The transmitter sees carrier --- its own --- and
+holds the link up. The other half of the light is the data path.
+
+\begin{figure}[h]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}
+  \node[host, minimum width=20mm] (low) {LOW host};
+  \node[mc, minimum width=20mm, right=13mm of low]
+       (A) {\textbf{MC-A}\\\scriptsize TX \quad RX};
+  \node[splitter, right=13mm of A] (S) {1$\times$2\\splitter};
+  \node[mc, minimum width=20mm, right=13mm of S]
+       (B) {\textbf{MC-B}\\\scriptsize TX \quad RX};
+  \node[host, minimum width=20mm, right=13mm of B] (high) {HIGH host};
+
+  \draw[copper] (low) -- (A);
+  \draw[copper] (B) -- (high);
+  \draw[fiber] (A.east) -- node[lblg,above]{TX} (S.west);
+  \draw[fiber] (S.east) -- node[lblg,above]{$-$\dbb{4}} node[lblg,below]{data} (B.west);
+  \draw[fiber] (S.south) to[out=-90,in=-90]
+        node[lblg,below]{$-$\dbb{4}\ \ return carrier (its own echo)} (A.south);
+
+  \node[lblr, above=6mm of B, align=center, anchor=south]
+       {MC-B fiber TX:\\\textbf{leave unconnected, capped}};
+  \draw[ldred,dashed] (B.north) -- +(0,5mm);
+\end{tikzpicture}}
+\caption{Two-converter diode. The splitter is passive and reciprocal, so the
+         unused legs matter as much as the used ones.}
+\label{fig:splitter}
+\end{figure}
+
+\begin{warnbox}[A splitter is reciprocal]
+An optical splitter is a passive, bidirectional device. Light entering any leg
+emerges from the others. In Figure~\ref{fig:splitter} the only reason no
+information flows backwards is that \textbf{MC-B's transmitter is not
+connected to anything}. Cap that port. If someone later patches MC-B's TX into
+a spare splitter leg --- or into the return fiber --- \highside{} data reaches
+MC-A's receiver and the diode is gone, with no visible change to the front
+panel LEDs.
+\end{warnbox}
+
+\begin{notebox}[The transmitter hears its own echo]
+MC-A receives its own transmission, so MC-A's copper port re-emits every frame
+the \lowside{} host sent. This is harmless to the diode property --- nothing
+from \highside{} is involved --- but it has two practical consequences:
+\begin{itemize}
+\item \textbf{Never put a switch between the \lowside{} host and MC-A.} The
+      echo becomes a forwarding loop and then a broadcast storm. Connect the
+      host's NIC directly.
+\item Disable ARP and IPv6 on the diode interface (\S\ref{sec:linklayer}) so
+      the host does not react to its own reflected broadcasts.
+\end{itemize}
+Topology B does not have this behaviour, which is a quiet point in its favour.
+\end{notebox}
+
+\subsection{Sourcing the splitter, and the power budget}
+\label{sec:budget}
+
+The part itself is unremarkable: an ordinary passive $1\times2$ 50:50
+splitter. It works with all three converters below, including the \nm{850}
+multimode MC200CM.\footnote{The \emph{Sensors} paper states that this approach
+``did not work'' for the MC200CM, and reports the three-converter arrangement
+being used instead (\cite{anton2024}, \S2.2). That wording describes the parts
+available at the time rather than a limitation of the method: no \nm{850}
+multimode splitter could be obtained within the timeframe of that work. The
+one eventually used had to be made to special order and took months to
+arrive, and with it in hand the two-converter topology works on the MC200CM
+exactly as it does at \nm{1310}.} Topology A is not limited by physics on any
+of them.
+
+What differs between wavelengths is \textbf{availability and price}, and the
+gap is large. Splitters at \nm{1310} are a fiber-to-the-home product ---
+single-mode, specified across \nm{1260}--\nm{1650}, manufactured by the
+million, stocked everywhere and cheap. Multimode splitters at \nm{850} are a
+specialty item: the \nm{850} splitter used for the gigabit build here had to
+be made to special order and took months to arrive. The component works
+perfectly well once you have it; the difficulty is entirely in getting one.
+
+\begin{tipbox}[What this means for a build]
+Choose Topology A freely at \nm{1310} (MC100CM or MC210CS) --- the splitter is
+a catalogue part you can have tomorrow. At \nm{850} (MC200CM) Topology A works
+just as well, but budget for a special order and a long lead time. If you need
+the diode sooner than the splitter can arrive, Topology B
+(\S\ref{sec:topoB}) needs no splitter at all and uses a third converter you
+can buy off the shelf. Match the splitter's fiber type to the link:
+single-mode splitter on single-mode fiber, multimode on multimode.
+\end{tipbox}
+
+\subsubsection{Power budget and attenuation}
+
+A 50:50 split costs $10\log_{10}2 = 3.01$\,dB per leg by construction, plus a
+little excess loss and connector loss --- call it \dbb{4} in round numbers.
+Every class below has room for that, which is why the splitter build works
+across the range. The figures are worth having anyway, because they tell you
+when to \emph{reduce} the light rather than worry about losing it:
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}llccccX@{}}
+\toprule
+\textbf{Model} & \textbf{Class} & \textbf{$\lambda$} &
+\textbf{TX min} & \textbf{RX sens.} & \textbf{Budget} & \textbf{Splitter} \\
+\midrule
+MC100CM & 100BASE-FX  & \nm{1310} & \dbm{-20}  & \dbm{-31} & $\approx$\dbb{11}   &
+  commodity, cheap \\
+MC200CM & 1000BASE-SX & \nm{850}  & \dbm{-9.5} & \dbm{-17} & $\approx$\dbb{7.5}  &
+  special order, long lead time \\
+MC210CS & 1000BASE-LX & \nm{1310} & \dbm{-9.5} & \dbm{-20} & $\approx$\dbb{10.5} &
+  commodity, cheap \\
+\bottomrule
+\end{tabularx}
+\caption{Class-typical IEEE 802.3 figures --- verify against your unit's
+         datasheet. ``Budget'' is worst-case launch power minus worst-case
+         receiver sensitivity; all three absorb a $\approx$\dbb{4} splitter.
+         The last column is a procurement note, not a technical limit.}
+\end{table}
+
+\begin{tipbox}[Too much light is the more common problem]
+A diode's fibers are usually a metre long while the converters are built to
+drive hundreds of metres or kilometres. Drive a receiver above its overload
+threshold and the link misbehaves in ways that look like random loss. Fixed
+optical attenuators are the fix, on either leg of the splitter or on the data
+path of a three-converter build --- the paper makes the same recommendation
+\cite{anton2024}. Keep a small assortment (\dbb{3}, \dbb{5}, \dbb{10}) on the
+bench: they are inexpensive and turn a flapping link into a stable one in
+seconds.
+\end{tipbox}
+
+\subsection{Topology B --- three converters in a triangle}
+\label{sec:topoB}
+
+No splitter to source, and no echo. A third converter acts purely as
+a carrier source. Its copper port is left unplugged, so it emits an idle
+optical carrier and can never carry data.
+
+\begin{figure}[h]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}
+  \node[host, minimum width=20mm] (low) {LOW host};
+  \node[mc, minimum width=20mm, right=15mm of low] (A) {\textbf{MC-A}\\\scriptsize input};
+  \node[mc, minimum width=20mm, right=26mm of A] (B) {\textbf{MC-B}\\\scriptsize output};
+  \node[host, minimum width=20mm, right=15mm of B] (high) {HIGH host};
+  \node[mc, minimum width=34mm, below=20mm of $(A)!0.5!(B)$,
+        fill=ldamber!10, draw=ldamber]
+       (C) {\textbf{MC-C} carrier source\\\scriptsize copper port UNPLUGGED};
+
+  \draw[copper] (low) -- (A);
+  \draw[copper] (B) -- (high);
+  \draw[fiber] (A.north east) to[out=45,in=135]
+        node[lblg,above]{\textbf{1.} MC-A TX $\rightarrow$ MC-B RX \ \emph{(data)}} (B.north west);
+  \draw[fiber] (B.south) to[out=-90,in=0]
+        node[lblg,right,pos=0.3]{\textbf{2.} MC-B TX $\rightarrow$ MC-C RX} (C.east);
+  \draw[fiber] (C.west) to[out=180,in=-90]
+        node[lblg,left,pos=0.7]{\textbf{3.} MC-C TX $\rightarrow$ MC-A RX} (A.south);
+  \node[lblr, below=1.5mm of C, align=center]
+       {copper unplugged $\Rightarrow$ links 2 and 3 carry carrier, never data};
+\end{tikzpicture}}
+\caption{Three-converter diode. The security argument rests on one unplugged
+         copper port.}
+\end{figure}
+
+\paragraph{Why it is safe.} Trace a hypothetical leak. \highside{} data enters
+MC-B's copper port, leaves MC-B's fiber TX on link~2, and arrives at MC-C's
+fiber RX. MC-C converts it to copper --- and its copper port goes nowhere, so
+the frames are discarded. MC-C's fiber TX is driven by MC-C's \emph{copper
+receiver}, which has no link and no traffic, so link~3 carries idle carrier
+only. The chain is broken at MC-C's unplugged copper port, and nowhere else.
+
+\paragraph{Why link 2 exists at all.} MC-C needs carrier on its own RX before
+it will bring its optical side up and start transmitting. Link~2 supplies it.
+The paper states the same requirement: the connection from the output
+converter to the signal emulator ``is necessary in order to keep the signal
+emulator running'' \cite{anton2024}.
+
+\begin{warnbox}[The single point of failure is a copper port]
+Everything rests on MC-C's copper port being unplugged. Cap it, label it
+\emph{``MUST REMAIN DISCONNECTED --- DATA DIODE''}, and put it first on the
+audit checklist in \S\ref{sec:commission}. A well-meaning administrator
+patching that port into the \lowside{} switch converts the diode into an
+ordinary bidirectional link, and no LED changes colour to say so.
+\end{warnbox}
+
+\begin{tipbox}[If MC-C will not light up]
+Some converters implement link-fault pass-through and go dark on fiber when
+their copper link is down. If MC-C behaves that way, give it a copper link
+that leads nowhere: an isolated switch port on a dead VLAN with no uplink, or
+a loopback plug. Never a port on the \lowside{} network --- that would rebuild
+the return path you just broke.
+\end{tipbox}
+
+\subsection{Choosing between them}
+
+Topology B is the default. It costs one more converter and one more power
+Both work at every wavelength here. Topology A is the tidier build --- one
+box fewer, one power supply fewer, and a passive component in place of an
+active one. Topology B trades that for parts you can buy off the shelf
+anywhere, and it avoids the transmitter echo. At \nm{1310} the choice is
+genuinely free; at \nm{850} it comes down to whether you can wait for the
+splitter.
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}p{38mm}XX@{}}
+\toprule
+ & \textbf{A: 2 converters + splitter} & \textbf{B: 3 converters} \\
+\midrule
+Parts            & 2 converters, 1 splitter, 3 patch cables &
+                   3 converters, 3 patch cables \\
+Power supplies   & 2 & 3 \\
+Optical margin   & Reduced by $\approx$\dbb{4}; within budget on all three
+                   models &
+                   Full budget on every link \\
+Procurement      & Trivial at \nm{1310}; the \nm{850} splitter is a special
+                   order with a long lead time &
+                   Everything is catalogue stock at any wavelength \\
+Transmitter echo & Yes --- host hears itself; no switch on the \lowside{} leg &
+                   No \\
+Failure points   & 2 active + 1 passive & 3 active \\
+Critical rule    & MC-B's TX must stay unconnected &
+                   MC-C's copper must stay unplugged \\
+\midrule
+\textbf{Use when} & You have the splitter, and want fewer boxes &
+                   You want to build today, at any wavelength \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Power, environment and maintenance}
+\label{sec:maint}
+
+Drawn from the paper's \S4.3, which is the most practically useful part of it
+\cite{anton2024}:
+
+\begin{itemize}
+\item \textbf{Power.} These converters run on 9\,V DC via a
+      centre-positive barrel connector; the MC200CM draws about 600\,mA. The
+      supplies shipped with them are unremarkable. A single stabilised
+      laboratory supply --- the paper uses an XP Power ECE60US09-S, 9\,V at
+      6.67\,A --- will run six diodes at once and is far better regulated,
+      though it costs an order of magnitude more than a converter.
+\item \textbf{UPS.} A diode is on the critical path for log delivery and
+      draws very little. Put it on a UPS.
+\item \textbf{Cooling.} Passive. Six diodes fit in a 2U case with no fans.
+\item \textbf{Attenuators} for short runs with long-range optics
+      (\S\ref{sec:budget}).
+\item \textbf{MTBF} is comparable to a network card, but a three-converter
+      diode has three of them plus their supplies. Keep a spare set.
+\item \textbf{Latency} is negligible --- nanoseconds. It never appears in
+      end-to-end measurements.
+\item \textbf{Managed converters} offer SNMP, fault alerts and test modes, and
+      are a genuine security risk on a diode: a management plane is a second
+      network path into the boundary device. The paper deliberately uses
+      unmanaged units. If you use managed ones, be certain their management
+      interfaces are on an isolated VLAN, and understand that you have added
+      software to a control whose entire value was that it had none.
+\end{itemize}
+
+\subsection{Scaling}
+
+Diodes are cheap, so scale out rather than up. Run several in parallel
+between the same pair of networks, using separate NICs or IP aliases on both
+sides, and spread messages across them round-robin --- the paper's
+Figure~10(a) arrangement. The receiver binds the same port on every address,
+so the links aggregate transparently. This is also the answer when the paper's
+repeat factor would otherwise need to exceed about 50: add a second diode
+rather than more redundancy on one.
+
+\subsection{Embedded scale: a three-wire SPI diode}
+\label{sec:spi}
+
+Media converters are the right answer between two networks. Between two
+microcontrollers --- a sensor gateway that must report into a protected
+monitoring domain, a safety PLC that must emit telemetry but never accept a
+command --- they are absurd: three converters, three power supplies and fiber
+patch cords to join two boards that sit ten centimetres apart.
+
+At that scale the diode is three wires. SPI already keeps its two data
+directions on \emph{physically separate conductors}, so removing one of them
+removes a direction. This is the same argument as the optical diode, at chip
+scale and for a few cents.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[node distance=34mm]
+  \node[host, minimum width=32mm, minimum height=22mm]
+       (lo) {\textbf{LOW} MCU\\\scriptsize SPI \textbf{master}};
+  \node[host, minimum width=32mm, minimum height=22mm, right=of lo]
+       (hi) {\textbf{HIGH} MCU\\\scriptsize SPI \textbf{slave}};
+
+  \draw[dataflow] ([yshift=6mm]lo.east)  -- node[lbl,above]{SCLK}
+                  ([yshift=6mm]hi.west);
+  \draw[dataflow] ([yshift=0mm]lo.east)  -- node[lbl,above]{MOSI}
+                  ([yshift=0mm]hi.west);
+  \draw[copper]   ([yshift=-6mm]lo.east) -- node[lbl,above]{GND}
+                  ([yshift=-6mm]hi.west);
+
+  \draw[blocked] ([yshift=-16mm]hi.west) -- ([yshift=-16mm]lo.east)
+                 node[midway,fill=white,inner sep=1.5pt]{\xmark}
+                 node[lblr,midway,below=3.5mm]{MISO --- conductor not fitted};
+\end{tikzpicture}
+\caption{A three-wire SPI diode. Every conductor is driven by the \lowside{}
+         side and read by the \highside{} side; the return data line is not
+         fitted.}
+\label{fig:spi}
+\end{figure}
+
+\subsubsection{The sender must be the master}
+
+This is the design decision that matters, and it is not the obvious one.
+
+An SPI master drives SCLK, CS and MOSI, and reads MISO. A slave drives MISO
+and reads the rest. For information to flow \lowside{}~$\rightarrow$~\highside{}
+with \emph{no} conductor driven from \highside{}, the \lowside{} side must be
+the master: it drives clock and data, and the \highside{} side only ever
+listens.
+
+The tempting alternative --- make the \highside{} side the master so it
+``pulls'' data --- quietly reintroduces a channel. A master drives the clock,
+so SCLK would run \highside{}~$\rightarrow$~\lowside{}, and the \highside{}
+side could then modulate the timing or gating of clock edges into a signal the
+\lowside{} side can observe. It is a low-rate channel, but it is a real one,
+and it exists by construction rather than by bug.
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+\textbf{Signal} & \textbf{Fitted?} & \textbf{Direction and role} \\
+\midrule
+SCLK & yes & \lowside{}~$\rightarrow$~\highside{}. Clock; the sender sets the
+             pace. \\
+MOSI & yes & \lowside{}~$\rightarrow$~\highside{}. The data. \\
+GND  & yes & Common return. See the isolation note below. \\
+CS   & optional & \lowside{}~$\rightarrow$~\highside{}. A fourth conductor
+             that gives hardware frame boundaries; strongly recommended. \\
+MISO & \textbf{no} & Would be \highside{}~$\rightarrow$~\lowside{}. Omit the
+             conductor entirely --- do not merely leave it unconfigured. \\
+\bottomrule
+\end{tabularx}
+\caption{Three conductors, or four with CS. The diode property is the row
+         that is not there.}
+\end{table}
+
+\begin{warnbox}[``3-wire SPI mode'' in a datasheet usually means the opposite]
+Many MCU and sensor datasheets use ``3-wire SPI'' for \emph{half-duplex} SPI,
+in which MOSI and MISO are collapsed onto one \textbf{bidirectional} data pin
+(often \cmd{SDIO} or \cmd{SDA}). That is a shared, driven-from-both-ends
+conductor --- precisely what a diode must not have. What is wanted here is
+ordinary full-duplex SPI with the MISO wire physically absent. Read the pin
+direction, not the marketing name.
+\end{warnbox}
+
+\begin{warnbox}[Never add a ready line]
+Without MISO there is no flow control: the master clocks bits out whether or
+not the slave is keeping up. The standard embedded fix is a GPIO from slave to
+master meaning ``ready'' or ``busy'' --- and that is a wire from \highside{} to
+\lowside{}. Adding it destroys the diode as thoroughly as fitting MISO would,
+and it is the single most likely mistake in this design because every SPI
+tutorial recommends it. Handle overrun the way the rest of this handbook
+handles loss: clock slowly enough that the receiver always keeps up, use DMA
+with double buffering, and send redundancy in advance.
+\end{warnbox}
+
+\subsubsection{Isolation}
+
+A shared ground is still a conductor between the two domains. Where that
+matters --- different power domains, an untrusted \lowside{} board, or simply a
+wish to make the property auditable at a glance --- put a digital isolator or
+an optocoupler on each of the three signals. This is worth doing for its own
+sake:
+
+\begin{itemize}
+\item An optocoupler is an LED illuminating a phototransistor. It is
+      \emph{physically} incapable of conducting backwards, so each isolated
+      line enforces its own direction in hardware --- the optical diode
+      argument, in a DIP-4 package.
+\item Galvanic isolation removes the shared ground return, so the two domains
+      no longer share a reference at all.
+\item Check the part's data rate. Ordinary optocouplers manage a few hundred
+      kbit/s; use a proper digital isolator for anything faster, and confirm
+      it is a single-channel unidirectional device rather than a
+      bidirectional or mixed-direction part.
+\end{itemize}
+
+\subsubsection{Framing, and what to run over it}
+
+With CS fitted, the slave gets frame boundaries in hardware and resynchronizes
+for free. Without it the receiver must find its own boundaries in the bit
+stream, so frame in band: a sync word, a length, the payload, and a check
+value. That is the same bounded-cursor discipline as everywhere else in this
+system --- a length is validated against what remains before it is ever used as
+an index, and a length that lies ends the frame instead of becoming a pointer.
+
+Everything the rest of this handbook says about a feedback-free link applies
+unchanged: no acknowledgement, so no retransmission; redundancy must be sent
+ahead of time; and authentication is what distinguishes a corrupted frame from
+a forged one.
+
+\begin{notebox}[Reusing the proven core on an MCU]
+The SPARK units in \file{src/core} --- the syslog parser, the batch framing and
+the AEAD wrapper --- are fixed-capacity and allocation-free by construction, so
+they do not depend on an operating system and can be cross-compiled for a bare
+metal target. \amp{} and \deamp{} themselves cannot: they are Linux daemons
+built on UDP sockets, and the sockets would have to be replaced by SPI
+transfers.
+
+The capacities are the obstacle worth planning for. As analyzed, the instance
+assumes \cmd{Secure.Max\_Plain}~=~65536, \cmd{Syslog.Max\_Record}~=~65535 and a
+relay holding sixteen in-flight messages --- megabytes of static buffers, which
+no small microcontroller has. Reducing them is a supported change, but it
+changes what was proved: the capacities are part of the analyzed instance, so
+a shrunken build must be re-proved before any of the assurance claims in
+\S\ref{sec:threat} carry over to it.
+\end{notebox}
+
+\subsubsection{Why not UART, and definitely not I\textsuperscript{2}C}
+
+\begin{itemize}
+\item \textbf{UART} is the simpler cousin and a perfectly good diode: wire the
+      sender's TX to the receiver's RX, omit the other direction, and you have
+      two wires plus ground. Use it when the rate is low and both ends have
+      accurate enough clocks. SPI is preferable when you want higher
+      throughput, or when a constrained device's oscillator is not good enough
+      for reliable asynchronous framing --- SPI carries its clock, so there is
+      no baud-rate drift to manage. Note that hardware flow control
+      (\cmd{RTS}/\cmd{CTS}) must be disabled: those are back channels.
+\item \textbf{I\textsuperscript{2}C cannot be made into a diode at all.} It is
+      not a matter of omitting a wire: SDA is shared and bidirectional by
+      design, and the protocol \emph{requires} the receiver to pull it low to
+      acknowledge every byte. The back channel is mandatory. Do not try.
+\end{itemize}
+
+\subsubsection{Commissioning an SPI diode}
+
+\begin{enumerate}
+\item \textbf{Count the wires.} Three, or four with CS. This is the whole
+      audit, and it is why the design is attractive --- correctness is visible
+      without instruments.
+\item \textbf{Continuity.} With both boards powered down, confirm an open
+      circuit between the \highside{} MCU's MISO pin and every conductor in
+      the cable. Repeat after any rework.
+\item \textbf{Drive test.} Configure the \highside{} MCU to drive its MISO pin
+      hard, high and low, in a loop. The \lowside{} MCU must see nothing on
+      any pin. This catches a MISO track left on a shared PCB, which a wire
+      count will not.
+\item \textbf{Isolator orientation.} If optocouplers are fitted, confirm each
+      one's input side faces \lowside{}. A part installed backwards will
+      usually appear to work --- in the wrong direction.
+\item \textbf{Overrun.} Run the sender at full rate for an extended period and
+      confirm the receiver's dropped-frame counter behaves as loss, not as
+      corruption reaching the application.
+\end{enumerate}
+
+%% =====================================================================
+\section{Commissioning and verification}
+\label{sec:commission}
+
+A diode you have not tested is a diode you have assumed. The tests below are
+ordered so that each one fails cheaply before the next.
+
+\subsection{Physical audit}
+
+\begin{enumerate}
+\item Trace every fiber by hand against the wiring table for your topology.
+\item Topology B: confirm MC-C's copper port is unplugged and capped.
+      Topology A: confirm MC-B's fiber TX is unconnected and capped.
+\item Confirm the \lowside{} host connects \emph{directly} to MC-A, with no
+      switch (mandatory for Topology A because of the echo).
+\item Photograph the finished wiring. Attach it to the commissioning record;
+      it is what a future auditor compares against.
+\end{enumerate}
+
+\subsection{Carrier independence}
+
+Unplug MC-B's copper cable from the \highside{} host. MC-A must keep its fiber
+link LED. If MC-A drops, its carrier is arriving from the far end and the link
+is bidirectional.
+
+Repeat in the other direction: power MC-C down (Topology B). MC-A should lose
+its fiber link, confirming that MC-C --- and not MC-B --- is its carrier
+source.
+
+\subsection{Active reverse probing}
+
+Capture everything on the \lowside{} host for the duration:
+
+\begin{lstlisting}[style=shell]
+# LOW host -- runs for the whole test, must stay silent
+tcpdump -ni enp1s0 -e -vv -w /tmp/diode-commissioning.pcap
+\end{lstlisting}
+
+From the \highside{} host, attempt every reasonable back channel:
+
+\begin{lstlisting}[style=shell]
+ping   -c 5            192.168.10.1        # ICMP echo
+arping -c 5 -I enp1s0  192.168.10.1        # link layer
+nc -u -w2              192.168.10.1 9999   # UDP
+nc    -w5              192.168.10.1 22     # TCP -- must time out
+hping3 -S -c 5 -p 22   192.168.10.1        # raw SYN
+hping3 -1 -c 5         192.168.10.1        # raw ICMP
+\end{lstlisting}
+
+Then verify the capture contains nothing whose source is the \highside{} host:
+
+\begin{lstlisting}[style=shell]
+tcpdump -nr /tmp/diode-commissioning.pcap "src host 192.168.10.2"
+# must print no packets
+\end{lstlisting}
+
+\subsection{Forward path and end-to-end}
+
+\begin{lstlisting}[style=shell]
+# HIGH host
+tcpdump -ni enp1s0 udp port 6514
+# LOW host
+echo hello | nc -u -w1 192.168.10.2 6514
+
+# then, with the daemons running:
+# LOW host
+logger -n 127.0.0.1 -P 1514 -p local0.crit "diode commissioning $(date -Is)"
+# HIGH host
+journalctl -f | grep "diode commissioning"
+\end{lstlisting}
+
+Finally, pull MC-A's TX fiber: the \highside{} side must stop receiving
+immediately, and the \lowside{} side must be entirely unaffected --- it has no
+way to notice.
+
+\subsection{Recurring audit}
+
+There is no remote diagnostic and no alarm. Failure and tampering are both
+silent, so both need a calendar entry.
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}p{26mm}X@{}}
+\toprule
+\textbf{Interval} & \textbf{Check} \\
+\midrule
+Continuous & \highside{}-side monitoring alerts if the log stream stops. This
+             is the only automatic failure indication you get --- configure it. \\
+Monthly    & Physical inspection: all LEDs as expected, MC-C's copper port
+             still unplugged, seals intact, photo still matches. \\
+Quarterly  & Repeat the active reverse probe of \S6.3 in full. \\
+On change  & Any rewiring, converter replacement, or firmware change re-runs
+             the entire commissioning sequence from \S6.1. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+%% =====================================================================
+\section{Running log-diode across the link}
+\label{sec:integrate}
+
+\subsection{Why the daemons are formally verified}
+
+The receiver parses bytes that arrive from the \emph{less} trusted network,
+on a link that cannot ask for anything to be resent, in a process that sits on
+the \highside{} side of the boundary. A parser that can fault or read out of
+bounds on a hostile log line is a foothold in exactly the place a diode exists
+to protect, and log injection is a standard technique for covering tracks.
+
+So the parsing and reconstruction path is written in SPARK and proved absent
+of run-time errors: \cmd{./tools/prove.sh} discharges 86 verification
+conditions with none unproved and none justified. Concretely, the syslog PRI
+parser is proved to yield a verdict on \emph{any} 0--65535-byte datagram
+without a run-time error, and the batch walker is proved never to read past
+its buffer when a length prefix lies about its size. The sockets and timers
+are a small trusted shell outside the proof; the full argument, including what
+is \emph{not} proved, is in \file{docs/ASSURANCE.md}.
+
+\subsection{The data path}
+
+\begin{figure}[h]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=6mm]
+  \node[mc, minimum width=20mm] (p) {syslog\\PRI parse};
+  \node[mc, minimum width=20mm, right=of p] (g) {severity\\gate};
+  \node[mc, minimum width=20mm, right=of g] (b) {batch\\pack};
+  \node[mc, minimum width=20mm, right=of b] (s) {AEAD\\seal};
+  \node[mc, minimum width=20mm, right=of s] (r) {RS encode\\+ interleave};
+  \draw[dataflow] (p)--(g); \draw[dataflow] (g)--(b);
+  \draw[dataflow] (b)--(s); \draw[dataflow] (s)--(r);
+  \node[lbl, left=3mm of p, align=right] {UDP\\:1514};
+  \node[lbl, right=3mm of r, align=left] {UDP\\:6514};
+
+  \node[mc, minimum width=20mm, below=13mm of p] (o) {syslog out\\:514};
+  \node[mc, minimum width=20mm, right=of o] (u) {batch\\unpack};
+  \node[mc, minimum width=20mm, right=of u] (op) {AEAD open\\verify tag};
+  \node[mc, minimum width=20mm, right=of op] (d) {RS decode\\dedup};
+  \node[mc, minimum width=20mm, right=of d] (rp) {replay\\window};
+  \draw[dataflow] (rp)--(d); \draw[dataflow] (d)--(op);
+  \draw[dataflow] (op)--(u); \draw[dataflow] (u)--(o);
+  \node[lbl, right=3mm of rp, align=left] {UDP\\:6514};
+
+  \node[lbl, left=13mm of p, align=center, text=ldblue] {\textbf{\amp{}}\\(LOW)};
+  \node[lbl, left=13mm of o, align=center, text=ldblue] {\textbf{\deamp{}}\\(HIGH)};
+\end{tikzpicture}}
+\caption{Sender and receiver pipelines. Sealing happens \emph{before} erasure
+         coding, so the code protects ciphertext and a decode failure and a
+         forgery are the same event to the receiver: a tag that does not
+         verify.}
+\end{figure}
+
+Encrypt-then-encode is the deliberate ordering. A message is sealed with
+ChaCha20-Poly1305 first, then Reed--Solomon coded. On the receiving side, a
+mis-decode caused by loss and a deliberate forgery injected onto the fiber
+both present identically --- a Poly1305 tag that fails --- and both are
+dropped rather than forwarded.
+
+\subsection{Deployment}
+
+\begin{lstlisting}[style=shell,caption={HIGH side --- start this first}]
+./bin/ld_deamp 6514 127.0.0.1 514 --key "$DIODE_KEY"
+\end{lstlisting}
+
+\begin{lstlisting}[style=shell,caption={LOW side}]
+./bin/ld_amp 1514 192.168.10.2 6514 --key "$DIODE_KEY" \
+             --batch 8 --parity 6 --interleave 8 --flush-ms 500
+\end{lstlisting}
+
+\begin{lstlisting}[style=conf,caption={Log producers --- \file{/etc/rsyslog.conf}}]
+*.*  @192.168.10.1:1514
+\end{lstlisting}
+
+\begin{lstlisting}[style=conf,caption={HIGH host --- \file{/etc/rsyslog.d/10-diode-in.conf}}]
+module(load="imudp")
+input(type="imudp" address="127.0.0.1" port="514")
+\end{lstlisting}
+
+Both daemons run as \prog{systemd} services in production; the \emph{Quick
+Start} \S6.3 has unit files with the key supplied through a
+mode-\cmd{0400} \cmd{EnvironmentFile} rather than the command line, so it does
+not appear in \cmd{ps}.
+
+\subsection{Tuning the redundancy}
+\label{sec:tuning}
+
+Three knobs trade bandwidth for loss resilience. They are not
+interchangeable.
+
+\begin{description}[leftmargin=0pt, style=nextline]
+\item[\cmd{--parity M} --- how much loss you survive.]
+  A message is split into $K$ data fragments; $M$ parity fragments are added,
+  and any $K$ of the $K+M$ rebuild it exactly. Raise this first when messages
+  go missing. Cost is linear: $M/K$ extra bandwidth.
+\item[\cmd{--interleave D} --- what \emph{shape} of loss you survive.]
+  Fragments of $D$ messages are emitted column-major, so a burst that wipes
+  out several consecutive datagrams takes at most one fragment from each
+  message instead of all of one message's fragments. This is the direct fix
+  for the paper's back-to-back repetition, whose weakness the paper itself
+  identifies. It costs latency, not bandwidth.
+\item[\cmd{--batch N} --- how efficient the code is.]
+  At $N=1$ a single log line makes a $K=1$ block, and Reed--Solomon at $K=1$
+  \emph{is} plain repetition: parity fragments are just copies, and there is
+  no coding gain. Batching several lines into one block gives $K \geq 2$ and
+  real gain, which is much cheaper on the wire than repeating every line.
+  Cost: records become coupled --- a block that fails to decode loses all $N$
+  --- and a partial batch waits up to \cmd{--flush-ms} before it is sent.
+\end{description}
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}p{34mm}p{40mm}X@{}}
+\toprule
+\textbf{Situation} & \textbf{Setting} & \textbf{Reasoning} \\
+\midrule
+Quiet link, low volume &
+  \cmd{--batch 1 --parity 3} &
+  Latency matters more than efficiency; no coupling between records. \\
+Busy link, bursty loss &
+  \cmd{--batch 8 --parity 6 --interleave 8} &
+  Real coding gain, and bursts are spread across messages. \\
+Congested link &
+  \cmd{--batch 16 --parity 8 --interleave 16 --pace-us 100} &
+  Batching cuts total datagrams; pacing avoids overrunning the receiver. \\
+Critical events only &
+  add \cmd{--min-severity 4} &
+  Ships warnings and worse; drops notice, info and debug at the source. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{notebox}[Unparseable lines are forwarded]
+If a datagram's PRI does not parse, \amp{} forwards it rather than dropping
+it. A malformed log line may be the most interesting thing that happens all
+week, and a severity gate that silently discards what it cannot understand is
+a gate an attacker can walk through by sending garbage.
+\end{notebox}
+
+\subsection{Keys and nonces}
+
+\begin{itemize}
+\item The key is 32 bytes, given as 64 hex characters, and must be identical
+      on both sides. \cmd{openssl rand -hex 32}.
+\item There is no key exchange across a diode. Carry it by hand.
+\item Rotation means restarting both daemons; do the \highside{} side first so
+      nothing is lost, and accept a brief window in which messages sealed with
+      the old key are dropped.
+\item Nonce uniqueness rests on a per-run random salt from the OS CSPRNG plus
+      a strictly increasing per-run counter. A salt collision across runs
+      would weaken the AEAD --- this is listed as a residual risk in
+      \file{docs/ASSURANCE.md} and is the reason the salt is drawn from
+      \cmd{getrandom(2)} rather than from a clock.
+\item Without \cmd{--key}, logs cross in the clear. That is a legitimate
+      choice on a link you already consider physically protected, but it
+      also disables the authentication that rejects forgeries injected onto
+      the fiber.
+\end{itemize}
+
+%% =====================================================================
+\section{Troubleshooting}
+
+% longtable has no X column type; widths are explicit (text block is 160mm).
+\begin{longtable}{@{}p{40mm}p{34mm}p{73mm}@{}}
+\toprule
+\textbf{Symptom} & \textbf{Likely cause} & \textbf{Check} \\
+\midrule
+\endhead
+No fiber link LED on MC-A &
+  No carrier on its RX &
+  Topology B: is MC-C powered and lit? Is link~3 seated? Topology A: is the
+  return leg of the splitter connected? \\
+MC-C completely dark (Topology B) &
+  Link-fault pass-through, copper down &
+  Give MC-C a dead-VLAN copper link or loopback plug (\S\ref{sec:topoB}). \\
+Link comes up, then flaps &
+  Too much or too little light &
+  Most often receiver overload on a short run. Add attenuation; check the
+  ferrules are clean before anything else (\S\ref{sec:budget}). \\
+\highside{} receives nothing, LEDs all good &
+  ARP or firewall &
+  \cmd{ip neigh show} must report PERMANENT. Check \cmd{rp\_filter} if the
+  two sides are on different subnets. \cmd{tcpdump} on the \highside{} NIC. \\
+\highside{} sees datagrams but emits no syslog &
+  Tag verification failing &
+  Keys differ between the two sides, or one side has \cmd{--key} and the
+  other does not. \\
+High loss under load &
+  Receiver overrun &
+  Raise \cmd{--parity}, add \cmd{--pace-us}, raise the socket receive buffer,
+  or add a second diode in parallel. \\
+Loss in bursts, fine otherwise &
+  No interleaving &
+  Raise \cmd{--interleave}; this is the case it exists for. \\
+Whole groups of lines vanish together &
+  Batch coupling &
+  A failed block loses all $N$ records. Lower \cmd{--batch} or raise
+  \cmd{--parity}. \\
+Broadcast storm on the \lowside{} segment &
+  Topology A echo through a switch &
+  Connect the \lowside{} host directly to MC-A (\S\ref{sec:topoA}). \\
+\lowside{} host logs traffic from itself &
+  Topology A echo, expected &
+  Harmless. Confirm the source is the \lowside{} host, not \highside{} --- if
+  it is \highside{}, stop and re-run \S\ref{sec:commission}. \\
+\bottomrule
+\end{longtable}
+
+%% =====================================================================
+\section{What log-diode changes relative to the paper}
+
+The paper is the design; the software described here is a from-scratch
+Ada/SPARK implementation of it with four deliberate changes, each closing a
+limitation the paper itself notes.
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}p{33mm}p{33mm}X@{}}
+\toprule
+\textbf{Paper} & \textbf{Here} & \textbf{Why it is strictly better} \\
+\midrule
+Speck-R, CTR mode &
+  ChaCha20-Poly1305 &
+  CTR gives confidentiality but no authentication tag, and is malleable.
+  ``Did it decrypt to printable ASCII?'' is a heuristic, not integrity. AEAD
+  rejects a forged or bit-flipped line on a real 128-bit tag. \\[3pt]
+Replay defence by a synchronised 64-bit counter &
+  Anti-replay window; the nonce binds the counter &
+  A replayed datagram fails the tag outright, and the two sides no longer
+  have to keep a cipher counter bit-synchronised across a lossy one-way
+  link. \\[3pt]
+Repetition $\times R$, back to back &
+  Interleaved repetition + Reed--Solomon &
+  The paper's own observation: plain repetition dies to a burst that takes
+  all $R$ copies. Interleaving spreads them in time; RS with $K \geq 2$ beats
+  copies outright. \\[3pt]
+Repeat every line ($K=1$) &
+  \cmd{--batch N} &
+  One line is RS at $K=1$, which is repetition with no coding gain. Batching
+  lets one block protect $N$ lines --- far cheaper under congestion. \\[3pt]
+Unverified reference implementation &
+  AoRTE machine-checked (\prog{gnatprove}) &
+  The parser consumes attacker-influenced bytes; a hostile line can never
+  fault the daemon. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+%% =====================================================================
+\begin{thebibliography}{99}
+\small
+\bibitem{anton2024}
+A.-A. Anton, P. Csereoka, E. A. Capot\u{a} and R.-D. Cioarg\u{a},
+``Enhancing Syslog Message Security and Reliability over Unidirectional Fiber
+Optics'', \emph{Sensors}, vol.~24, no.~20, 6537, 2024.
+\url{https://doi.org/10.3390/s24206537}
+
+\bibitem{bell1976}
+D. E. Bell and L. J. LaPadula,
+``Secure Computer System: Unified Exposition and Multics Interpretation'',
+MITRE Technical Report ESD-TR-75-306, 1976.
+
+\bibitem{rfc5424}
+R. Gerhards, ``The Syslog Protocol'', RFC 5424, IETF, 2009.
+
+\bibitem{rfc8439}
+Y. Nir and A. Langley, ``ChaCha20 and Poly1305 for IETF Protocols'',
+RFC 8439, IETF, 2018.
+
+\bibitem{ieee8023}
+IEEE Std 802.3, \emph{IEEE Standard for Ethernet}, clauses 26 (100BASE-FX)
+and 38 (1000BASE-SX/LX). Source of the class-typical optical figures in
+\S\ref{sec:budget}.
+
+\bibitem{etherled}
+M. Guri, ``ETHERLED: Sending Covert Morse Signals from Air-Gapped Devices via
+Network Card (NIC) LEDs'', \emph{IEEE International Conference on Cyber
+Security and Resilience (CSR)}, 2022, pp.~163--170.
+
+\bibitem{lantenna}
+M. Guri, ``LANTENNA: Exfiltrating Data from Air-Gapped Networks via Ethernet
+Cables Emission'', \emph{IEEE 45th Annual Computers, Software, and
+Applications Conference (COMPSAC)}, Madrid, 2021, pp.~745--754.
+
+\bibitem{powerhammer}
+M. Guri, B. Zadov, D. Bykhovsky and Y. Elovici, ``PowerHammer: Exfiltrating
+Data From Air-Gapped Computers Through Power Lines'', \emph{IEEE Transactions
+on Information Forensics and Security}, vol.~15, pp.~1879--1890, 2020.
+
+\bibitem{gsmem}
+M. Guri, A. Kachlon, O. Hasson, G. Kedma, Y. Mirsky and Y. Elovici,
+``GSMem: Data Exfiltration from Air-Gapped Computers over GSM Frequencies'',
+\emph{24th USENIX Security Symposium}, Washington DC, 2015, pp.~849--864.
+
+\bibitem{sparknacl}
+R. Chapman, \emph{SPARKNaCl}: a verified Ada/SPARK implementation of TweetNaCl.
+\url{https://github.com/rod-chapman/SPARKNaCl}
+
+\bibitem{assurance}
+log-diode project, \emph{Trusted-boundary assurance argument},
+\file{docs/ASSURANCE.md}.
+\end{thebibliography}
+
+\vfill
+\begin{center}\small
+\textcolor{ldgray}{%
+Made \copyleft{} libre (free as in freedom) at
+Politehnica University of Timi\c{s}oara.\\
+Copyright \copyright{} 2026 Alin-Adrian Anton.\\
+This document is licensed under the Creative Commons Attribution 4.0
+International Licence (CC~BY~4.0) or any later version.\\
+\url{https://creativecommons.org/licenses/by/4.0/}}
+\end{center}
+
+\end{document}

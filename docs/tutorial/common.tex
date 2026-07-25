@@ -1,0 +1,181 @@
+%% SPDX-License-Identifier: CC-BY-4.0
+%% Copyright (C) 2026  Alin-Adrian Anton <alin.anton@upt.ro>
+%%
+%% common.tex -- shared preamble for the log-diode tutorial documents.
+%% Input from the preamble of both diode-quickstart.tex and
+%% data-diode-handbook.tex.  Everything here must work with a stock
+%% TeX Live / texlive-collection-latexrecommended install; no external
+%% images, all figures are TikZ.
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[a4paper,margin=25mm,headheight=15pt]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{graphicx}      % \reflectbox (\copyleft), \resizebox for wide figures
+\usepackage{booktabs,tabularx,longtable,array}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,shapes.geometric,calc,fit,backgrounds}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+\usepackage[hidelinks,pdfusetitle]{hyperref}
+
+%% ---------------------------------------------------------------- colours
+\definecolor{ldblue}  {HTML}{1F4E79}
+\definecolor{ldred}   {HTML}{A61B1B}
+\definecolor{ldgreen} {HTML}{1E6F3C}
+\definecolor{ldamber} {HTML}{9A6700}
+\definecolor{ldgray}  {HTML}{5A5A5A}
+\definecolor{codebg}  {HTML}{F6F6F4}
+
+%% ---------------------------------------------------------------- headers
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\footnotesize\textsc{\doctitleshort}}
+\fancyhead[R]{\footnotesize\thepage}
+\fancyfoot[C]{\footnotesize log-diode tutorial --- CC BY 4.0}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+
+%% ---------------------------------------------------------------- listings
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{ldgray!40},
+  framesep=4pt,
+  xleftmargin=6pt,
+  xrightmargin=2pt,
+  breaklines=true,
+  breakatwhitespace=false,
+  postbreak=\mbox{\textcolor{ldgray}{$\hookrightarrow$}\space},
+  showstringspaces=false,
+  keepspaces=true,
+  columns=fullflexible,
+  commentstyle=\color{ldgreen}\itshape,
+  keywordstyle=\color{ldblue}\bfseries,
+  stringstyle=\color{ldred},
+  captionpos=b,
+  aboveskip=8pt,
+  belowskip=6pt,
+  tabsize=2,
+}
+
+\lstdefinestyle{shell}{
+  language=bash,
+  morekeywords={ip,nft,iptables,ip6tables,pfctl,sysctl,systemctl,tcpdump,arp,
+                ethtool,openssl,ld_amp,ld_deamp,rsyslogd,hping3,arping,nc,socat},
+}
+\lstdefinestyle{conf}{
+  language=,
+  morecomment=[l]{\#},
+}
+\lstdefinestyle{nft}{
+  language=,
+  morecomment=[l]{\#},
+  morekeywords={table,chain,rule,type,hook,priority,policy,iif,oif,iifname,
+                oifname,udp,dport,daddr,saddr,accept,drop,filter,ingress,
+                input,output,forward,inet,netdev,ip,ip6,meta,counter,limit,log},
+  keywordstyle=\color{ldblue}\bfseries,
+}
+\lstdefinestyle{pf}{
+  language=,
+  morecomment=[l]{\#},
+  morekeywords={set,block,pass,in,out,quick,on,proto,from,to,port,all,
+                no-state,state,antispoof,skip,block-policy,scrub,keep},
+  keywordstyle=\color{ldblue}\bfseries,
+}
+\lstdefinestyle{ada}{
+  language=Ada,
+  morekeywords={SPARK_Mode,Pre,Post,Loop_Invariant},
+}
+\lstdefinestyle{c}{
+  language=C,
+  basicstyle=\ttfamily\scriptsize,
+  morekeywords={ssize_t,size_t,sig_atomic_t,uint8_t,IFF_TAP,IFF_NO_PI,
+                TUNSETIFF,POLLIN,O_RDWR,O_CLOEXEC,EINTR,EAGAIN,IFNAMSIZ},
+  numbers=left,
+  numberstyle=\ttfamily\tiny\color{ldgray!70},
+  numbersep=7pt,
+}
+
+%% ------------------------------------------------------------- admonitions
+\newtcolorbox{warnbox}[1][Warning]{%
+  breakable, enhanced, colback=ldred!4, colframe=ldred,
+  boxrule=0.9pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
+  fonttitle=\bfseries\sffamily\small, title={#1}}
+
+\newtcolorbox{labbox}[1][Laboratory use only]{%
+  breakable, enhanced, colback=ldamber!6, colframe=ldamber,
+  boxrule=0.9pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
+  fonttitle=\bfseries\sffamily\small, title={#1}}
+
+\newtcolorbox{notebox}[1][Note]{%
+  breakable, enhanced, colback=ldblue!4, colframe=ldblue,
+  boxrule=0.7pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
+  fonttitle=\bfseries\sffamily\small, title={#1}}
+
+\newtcolorbox{tipbox}[1][In practice]{%
+  breakable, enhanced, colback=ldgreen!4, colframe=ldgreen,
+  boxrule=0.7pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
+  fonttitle=\bfseries\sffamily\small, title={#1}}
+
+%% ------------------------------------------------------------------ macros
+%% Copyleft (U+1F12F).  No Latin Modern / T1 glyph exists and neither
+%% cclicenses nor ccicons is in a base TeX Live, so mirror the copyright
+%% sign -- which is exactly what the symbol is.  \mathord keeps the spacing
+%% sane when it lands next to text.
+\newcommand{\copyleft}{\reflectbox{\copyright}}
+
+\newcommand{\cmd}[1]{\texttt{#1}}
+\newcommand{\file}[1]{\texttt{#1}}
+\newcommand{\prog}[1]{\textsf{#1}}
+\newcommand{\amp}{\prog{ld\_amp}}
+\newcommand{\deamp}{\prog{ld\_deamp}}
+\newcommand{\lowside}{\textsc{low}}
+\newcommand{\highside}{\textsc{high}}
+\newcommand{\nm}[1]{#1\,nm}
+\newcommand{\dbm}[1]{#1\,dBm}
+\newcommand{\dbb}[1]{#1\,dB}
+
+%% ------------------------------------------------------------ tikz styles
+\tikzset{
+  host/.style     ={draw, rounded corners=2pt, minimum width=27mm,
+                    minimum height=12mm, align=center, font=\small,
+                    fill=ldblue!8, draw=ldblue!70},
+  mc/.style       ={draw, minimum width=25mm, minimum height=13mm,
+                    align=center, font=\scriptsize, fill=gray!8,
+                    draw=ldgray},
+  netbox/.style   ={draw, dashed, rounded corners=3pt, draw=ldgray!70,
+                    inner sep=5mm},
+  splitter/.style ={draw, diamond, aspect=1.5, inner sep=1.5pt,
+                    align=center, font=\scriptsize, fill=ldgreen!12,
+                    draw=ldgreen},
+  fiber/.style    ={-{Latex[length=2.4mm,width=1.8mm]}, thick,
+                    draw=ldgreen!65!black},
+  copper/.style   ={-, thick, draw=ldblue!70!black},
+  dataflow/.style ={-{Latex[length=3.4mm,width=2.6mm]}, line width=1.5pt,
+                    draw=ldblue},
+  blocked/.style  ={-{Latex[length=2.4mm]}, thick, draw=ldred, dashed},
+  lbl/.style      ={font=\scriptsize\sffamily, inner sep=1.5pt},
+  lblg/.style     ={font=\scriptsize\sffamily, inner sep=1.5pt,
+                    text=ldgreen!55!black},
+  lblr/.style     ={font=\scriptsize\sffamily, inner sep=1.5pt, text=ldred},
+}
+
+%% A red "no return path" marker, placed on a path with node[midway]{\xmark}.
+\newcommand{\xmark}{\textcolor{ldred}{\sffamily\bfseries\large $\times$}}
+
+%% ------------------------------------------------------------ title block
+\titleformat{\section}{\normalfont\Large\bfseries\color{ldblue}}{\thesection}{0.7em}{}
+\titleformat{\subsection}{\normalfont\large\bfseries\color{ldblue!85!black}}{\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}{\normalfont\normalsize\bfseries}{\thesubsubsection}{0.6em}{}
+\setlist[itemize]{itemsep=2pt, topsep=3pt, parsep=0pt}
+\setlist[enumerate]{itemsep=2pt, topsep=3pt, parsep=0pt}
+\captionsetup{font=small, labelfont={bf,color=ldblue}}

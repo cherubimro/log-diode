@@ -2,3 +2,13 @@
 /bin/
 deps/sparknacl/obj/
 deps/sparknacl/lib/
+
+# Tutorial PDFs and LaTeX intermediates are regenerable: ./tools/doc.sh
+docs/tutorial/*.pdf
+docs/tutorial/*.aux
+docs/tutorial/*.log
+docs/tutorial/*.out
+docs/tutorial/*.toc
+docs/tutorial/*.fls
+docs/tutorial/*.fdb_latexmk
+docs/tutorial/*.synctex.gz
