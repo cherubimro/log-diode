@@ -443,12 +443,15 @@ cords cover it with one strand spare. Match the connector and fiber type to
 the converter, and budget one power supply per converter (9\,V DC,
 centre-positive barrel). See Handbook \S5.6 for power, UPS and rack notes.
 
-\begin{tipbox}[Keep a few optical attenuators on the bench]
-These converters are built to drive hundreds of metres or kilometres, and a
-diode's fibers are about a metre. Too much light at the receiver produces a
-link that flaps or drops frames in ways that look like random loss. Fixed
-attenuators (\dbb{3}, \dbb{5}, \dbb{10}) are inexpensive and fix it in
-seconds.
+\begin{tipbox}[Attenuators: only if you use long-range optics]
+Three \emph{matched} converters need no attenuation, however short the fiber:
+within an optical class the maximum launch power is set at or below the
+maximum receive power, so a compliant transmitter cannot overload a compliant
+receiver. If instead you use a long-range converter or SFP --- built to drive
+tens of kilometres --- across the metre of fiber a diode needs, it can exceed
+the receiver's maximum input power, which shows up as CRC errors and dropped
+frames. Fixed attenuators (\dbb{3}, \dbb{5}, \dbb{10}) are the fix; size them
+from the datasheet figures. Handbook \S5.3.
 \end{tipbox}
 
 \subsection{Wiring}

@@ -3,8 +3,9 @@
 deps/sparknacl/obj/
 deps/sparknacl/lib/
 
-# Tutorial PDFs and LaTeX intermediates are regenerable: ./tools/doc.sh
-docs/tutorial/*.pdf
+# The tutorial PDFs are committed so they can be read without a LaTeX
+# toolchain; rebuild them with ./tools/doc.sh after editing the sources.
+# The LaTeX intermediates are not.
 docs/tutorial/*.aux
 docs/tutorial/*.log
 docs/tutorial/*.out

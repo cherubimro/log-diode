@@ -1088,15 +1088,25 @@ MC210CS & 1000BASE-LX & \nm{1310} & \dbm{-9.5} & \dbm{-20} & $\approx$\dbb{10.5}
          The last column is a procurement note, not a technical limit.}
 \end{table}
 
-\begin{tipbox}[Too much light is the more common problem]
-A diode's fibers are usually a metre long while the converters are built to
-drive hundreds of metres or kilometres. Drive a receiver above its overload
-threshold and the link misbehaves in ways that look like random loss. Fixed
-optical attenuators are the fix, on either leg of the splitter or on the data
-path of a three-converter build --- the paper makes the same recommendation
-\cite{anton2024}. Keep a small assortment (\dbb{3}, \dbb{5}, \dbb{10}) on the
-bench: they are inexpensive and turn a flapping link into a stable one in
-seconds.
+\begin{tipbox}[When to attenuate]
+A receiver has a maximum input power as well as a sensitivity floor, and
+exceeding it saturates the front end and raises the bit error rate --- which
+reaches the application as CRC failures and dropped frames.
+
+Within one optical class this is designed out: the standard sets the maximum
+launch power at or below the maximum receive power (\dbm{-14} against
+\dbm{-14} for 100BASE-FX, \dbm{-4} against \dbm{0} for 1000BASE-SX, \dbm{-3}
+against \dbm{-3} for 1000BASE-LX), so two matched short-reach converters
+cannot overload each other even over a metre of fiber. Three matched
+converters on a bench need no attenuation.
+
+The case that does need it is the paper's: a \emph{long-range} converter or
+SFP --- one built to drive tens of kilometres, and launching accordingly ---
+used across the short fiber a diode actually needs \cite{anton2024}. Fixed
+attenuators (\dbb{3}, \dbb{5}, \dbb{10}) are inexpensive; size them from the
+launch power and the receiver's maximum in your datasheets rather than by
+trial. They are also how you trim one leg of a splitter without touching the
+other.
 \end{tipbox}
 
 \subsection{Topology B --- three converters in a triangle}
@@ -1700,9 +1710,10 @@ MC-C completely dark (Topology B) &
   Link-fault pass-through, copper down &
   Give MC-C a dead-VLAN copper link or loopback plug (\S\ref{sec:topoB}). \\
 Link comes up, then flaps &
-  Too much or too little light &
-  Most often receiver overload on a short run. Add attenuation; check the
-  ferrules are clean before anything else (\S\ref{sec:budget}). \\
+  Contamination, a bad splice, or a marginal connector &
+  Clean and reseat the ferrules first --- this is the usual cause by a wide
+  margin. Only suspect overload if you are running long-range optics over a
+  short fiber (\S\ref{sec:budget}). \\
 \highside{} receives nothing, LEDs all good &
   ARP or firewall &
   \cmd{ip neigh show} must report PERMANENT. Check \cmd{rp\_filter} if the
